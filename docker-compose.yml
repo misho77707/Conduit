@@ -1,0 +1,122 @@
+# Conduit: frontend + api + worker + beat + redis + postgres.
+#
+#   mkdir -p data          # before the first start, so ./data belongs to you and not to root
+#   cp .env.example .env   # then set CONDUIT_SECRET_KEY (see the file)
+#   docker compose up --build
+
+x-backend: &backend
+  build: ./backend
+  restart: unless-stopped
+  # Run as the owner of ./data (uid 1000 is the default user in WSL / most Linux hosts). If `ls -n data` shows a
+  # different owner, set CONDUIT_UID / CONDUIT_GID in .env, otherwise uploads and reject files cannot be written.
+  user: "${CONDUIT_UID:-1000}:${CONDUIT_GID:-1000}"
+  environment: &backend-env
+    HOME: /tmp
+    CONDUIT_DATABASE_URL: postgresql+psycopg://conduit:${POSTGRES_PASSWORD:-conduit}@postgres:5432/conduit
+    CONDUIT_REDIS_URL: redis://redis:6379/0
+    CONDUIT_SECRET_KEY: ${CONDUIT_SECRET_KEY:?Set CONDUIT_SECRET_KEY in .env (see .env.example)}
+    CONDUIT_ADMIN_USER: ${CONDUIT_ADMIN_USER:-admin}
+    CONDUIT_ADMIN_PASSWORD: ${CONDUIT_ADMIN_PASSWORD:-}
+    CONDUIT_DATA_DIR: /data
+    CONDUIT_CORS_ORIGINS: ${CONDUIT_CORS_ORIGINS:-http://localhost:5173}
+    CONDUIT_HEALTH_CHECK_INTERVAL_S: ${CONDUIT_HEALTH_CHECK_INTERVAL_S:-30}
+    CONDUIT_KEEP_FINISHED_JOBS: ${CONDUIT_KEEP_FINISHED_JOBS:-10}
+    CONDUIT_MONITOR_DISKS: ${CONDUIT_MONITOR_DISKS:-} # extra disks for the Monitor, e.g. "/mnt/big:Big disk"
+  volumes:
+    - ./data:/data # uploads, rejects, SQLite/DuckDB files: drop files here
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    redis:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: conduit
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-conduit}
+      POSTGRES_DB: conduit
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U conduit -d conduit"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"] # queue + live state only; nothing to persist
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build: ./backend
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    environment: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *backend
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/api/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    # Optional: to use "docker" service checks in Monitor (is a container running / healthy?), mount the Docker
+    # socket read-only and uncomment. Note `volumes:` here replaces the whole list inherited from &backend, so
+    # keep the ./data line too. Only do this if you trust every user of this app - it grants read access to
+    # every container name, image, and running command on the host.
+    #
+    # The container runs as uid:gid 1000:1000 (see CONDUIT_UID/CONDUIT_GID above), which cannot read the socket
+    # on its own - verified live, it fails with "permission denied on /var/run/docker.sock" otherwise. On Docker
+    # Desktop the socket is owned root:root, so `group_add: ["0"]` (adds root as a supplementary group) is enough;
+    # on native Linux it's usually root:docker instead, so use that group's actual GID (`getent group docker`) in
+    # place of "0" if root doesn't have access there.
+    # volumes:
+    #   - ./data:/data
+    #   - /var/run/docker.sock:/var/run/docker.sock:ro
+    # group_add:
+    #   - "0"
+
+  # One worker process runs one job at a time; each job uses its own threads (options.workers) inside it.
+  # CONDUIT_WORKER_CONCURRENCY = how many jobs can run at once.
+  worker:
+    <<: *backend
+    command: ["celery", "-A", "app.worker.celery_app", "worker", "--loglevel=info", "--concurrency=${CONDUIT_WORKER_CONCURRENCY:-4}"]
+    # Optional, see the api service above for why and for the group_add note: mount the Docker socket read-only
+    # for "docker" checks run by this worker (scheduled/manual re-runs go through Celery, not just the API's own
+    # immediate-run thread).
+    # volumes:
+    #   - ./data:/data
+    #   - /var/run/docker.sock:/var/run/docker.sock:ro
+    # group_add:
+    #   - "0"
+
+  # Exactly one beat, so scaling `worker` never duplicates the schedule.
+  beat:
+    <<: *backend
+    command: ["celery", "-A", "app.worker.celery_app", "beat", "--loglevel=info", "--schedule=/tmp/celerybeat-schedule"]
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
