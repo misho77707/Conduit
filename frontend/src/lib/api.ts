@@ -238,6 +238,71 @@ export const jobsApi = {
   eventsUrl: (id: string) => `/api/jobs/${id}/events?token=${encodeURIComponent(getToken() || "")}`,
 };
 
+// ---- compare ------------------------------------------------------------------------
+// backend/app/compare/spec.py and the dicts of backend/app/compare/engine.py (snapshot, describe, summary)
+
+export type CompareSet = "missing" | "extra" | "mismatched" | "dup_source" | "dup_target";
+export interface ComparePair { source: string; target: string; include: boolean; }
+export interface CompareOptions {
+  ignore_nulls: boolean; check_duplicates: boolean; trim_text: boolean; case_insensitive: boolean;
+  float_decimals: number; sample_rows: number;
+}
+export interface CompareIn {
+  name?: string | null; source: SourceIn; target: SourceIn;
+  columns?: ComparePair[] | null; // null = pair same-named columns
+  keys?: string[] | null; // null = target's primary key; [] = compare whole rows
+  options: CompareOptions; job_id?: string | null;
+}
+export interface CompareColumnsOut {
+  source_columns: { name: string; type: string }[]; target_columns: { name: string; type: string }[];
+  pairs: { source: string; target: string }[]; unpaired_source: string[]; unpaired_target: string[];
+  suggested_keys: string[]; key_note: string;
+}
+export interface CompareSummary {
+  mode: "key" | "row"; keys: string[]; key_note: string;
+  columns: { name: string; source: string; source_type: string; target_type: string; compared_as: string }[];
+  unpaired_source: string[]; unpaired_target: string[];
+  rows_source: number; rows_target: number; matched: number; missing: number; extra: number; mismatched: number;
+  dup_source_rows: number; dup_target_rows: number; dup_source_keys?: number; dup_target_keys?: number;
+  null_keys_source?: number; null_keys_target?: number;
+  column_mismatches: Record<string, number>; sets: Partial<Record<CompareSet, number>>;
+  notes: string[]; identical: boolean; seconds: number; options: CompareOptions;
+}
+export interface CompareOut {
+  id: string; name: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "stalled"; phase: string;
+  rows_source: number; rows_target: number; summary: CompareSummary | null; error: string | null; spec: CompareIn;
+  job_id: string | null; created_at: string; started_at: string | null; finished_at: string | null;
+}
+export interface CompareRowsOut { set: CompareSet; columns: string[]; rows: Record<string, unknown>[]; total: number; offset: number; limit: number; }
+export interface CompareExportParams { sets: CompareSet[]; columns: "all" | "keys" | string[]; format: "csv" | "xlsx" | "parquet" | "json"; rows: "all" | "sample"; }
+
+export const compareApi = {
+  columns: (source: SourceIn, target: SourceIn) => post<CompareColumnsOut>("/compare/columns", { source, target }),
+  create: (body: CompareIn) => post<CompareOut>("/compare", body),
+  list: () => get<CompareOut[]>("/compare"),
+  get: (id: string) => get<CompareOut>(`/compare/${id}`),
+  rows: (id: string, set: CompareSet, offset = 0, limit = 100) =>
+    get<CompareRowsOut>(`/compare/${id}/rows?set=${set}&offset=${offset}&limit=${limit}`),
+  cancel: (id: string) => post<CompareOut>(`/compare/${id}/cancel`),
+  remove: (id: string) => del<void>(`/compare/${id}`),
+  download: async (id: string, p: CompareExportParams): Promise<{ blob: Blob; filename: string }> => {
+    const qs = new URLSearchParams({
+      sets: p.sets.join(","), columns: Array.isArray(p.columns) ? p.columns.join(",") : p.columns, format: p.format, rows: p.rows,
+    });
+    const token = getToken();
+    const res = await fetch(`/api/compare/${id}/export?${qs}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+    if (!res.ok) {
+      let msg = res.statusText;
+      try { msg = detailMessage(await res.json()) || msg; } catch { /* not JSON */ }
+      throw new ApiError(res.status, msg);
+    }
+    const cd = res.headers.get("content-disposition") || "";
+    const star = /filename\*=(?:UTF-8'')?([^;]+)/i.exec(cd)?.[1];
+    const plain = /filename="?([^";]+)"?/i.exec(cd)?.[1];
+    return { blob: await res.blob(), filename: star ? decodeURIComponent(star) : plain || `comparison.${p.format}` };
+  },
+};
+
 // ---- monitor ------------------------------------------------------------------------
 
 export type CheckKind = "http" | "tcp" | "query" | "docker";

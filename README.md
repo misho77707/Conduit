@@ -54,6 +54,7 @@ backend/app/
     steps.py           pipeline transform steps: rename/cast/filter/derive/split, SQL, Python
     schedule.py        pipeline scheduling: cron validation, next-run math, the due/claim logic
     types.py, ddl.py   one logical type vocabulary and per-database CREATE TABLE
+  compare/           source vs target diffs: spec, DuckDB diff engine, result exports
   monitor/           service checks (HTTP / TCP / query) and host resources (psutil)
   worker/            Celery app; runs jobs; beat runs health checks, due service checks and due pipelines
 backend/alembic/     migrations
@@ -108,6 +109,13 @@ frontend/design/      the original Claude Design prototype (reference only, not 
 | GET/PATCH/DELETE | /pipelines/{id} | read / update (source/steps changes clear the cached schema; schedule/enabled changes recompute `next_run_at`) / delete |
 | POST | /pipelines/{id}/preview | sample the source, run the step chain, return columns + rows; a full-chain preview caches the schema `/run` needs |
 | POST | /pipelines/{id}/run | run it now as a job (`kind: "pipeline"`); 422 if there's no cached schema yet (preview first) |
+| POST | /compare/columns | both sides' columns, the automatic pairing (same names) and the suggested key |
+| GET/POST | /compare | list the latest comparisons / start one (`CompareIn`; bad tables, columns or keys fail with 422 right away) |
+| GET | /compare/{id} | status, phase, rows read per side, and the summary when done |
+| GET | /compare/{id}/rows | `?set=missing\|extra\|mismatched\|dup_source\|dup_target&offset=&limit=`: one page of a result set |
+| GET | /compare/{id}/export | `?sets=a,b&columns=all\|keys\|a,b&format=csv\|xlsx\|parquet\|json&rows=all\|sample`: a file (several sets: a .zip, Excel: one sheet each) |
+| POST | /compare/{id}/cancel | stop it |
+| DELETE | /compare/{id} | remove it and its result files |
 | GET | /health | liveness + app DB check |
 
 Secrets (passwords, MongoDB URIs) are encrypted with `CONDUIT_SECRET_KEY` and never returned.
@@ -307,6 +315,46 @@ column, with pause/resume in the row menu.
   the raw source, not the post-filter output, so the progress bar can look like it plateaus near the end.
 - **Remote intake isn't built.** A pipeline's `source` is today's table/query/file — S3, SFTP, a URL and
   a watched folder (all in the design) aren't sources yet.
+
+## Compare
+
+Checks that a target holds exactly what a source has. Pick a source (a table, a SQL query or a file) and a target
+(any saved connection, table or query) on the **Compare** page, or press **Verify** on a finished job to open it
+pre-filled with that load's source, target and column mapping. Columns with the same name (any case) are paired
+automatically; renamed ones can be paired by hand, and unpaired columns are listed but not compared.
+
+**How rows are matched.** By key columns, defaulting to the target table's primary key (else the source's). That
+gives three result sets: **missing in target**, **extra in target**, and **value differences** (same key, at least
+one value differs, with source → target side by side and the list of differing columns). With no key, whole rows
+are compared as multisets (`EXCEPT ALL`), so duplicates count and a changed row is one missing plus one extra row.
+**Duplicates** in the source and in the target are reported as separate sets (keys, or whole rows, seen more
+than once).
+
+| Option | Default | Meaning |
+|---|---|---|
+| `ignore_nulls` | off | a NULL on either side is not a difference (key matching only) |
+| `check_duplicates` | on | report duplicate keys / rows on each side |
+| `trim_text` | off | ignore leading / trailing whitespace |
+| `case_insensitive` | off | `'ABC'` equals `'abc'` |
+| `float_decimals` | 6 | FLOAT / DOUBLE are rounded first, so `0.1 + 0.2` equals `0.3` |
+| `sample_rows` | 100 | rows per set for a "sample only" export |
+
+**Types.** Values are compared by value, not by text: each column pair is cast to one common type (integers and
+decimals exactly, anything with a float as DOUBLE, DATE vs TIMESTAMP as TIMESTAMP, time-zone-aware times as UTC).
+Text compared with a typed column is parsed as that type (`' 1.50'` equals `1.5`); text that does not parse is
+NULL and so a difference. Anything else is compared as text.
+
+**How it runs.** Like a load job: in the Celery worker (or a thread with `CONDUIT_JOB_RUNNER=thread`), both sides
+read at the same time through the load engine's adapters into a scratch DuckDB file under `/data/compare/<id>/`,
+then diffed in SQL. The scratch copy is deleted as soon as the diff is done; only the result sets are kept, and only
+for the latest `CONDUIT_KEEP_COMPARISONS` (default 10) comparisons. Results can be paged in the UI and exported as
+CSV (default), Excel, Parquet or NDJSON, everything or just the sample, all compared columns or only some (key
+columns always included).
+
+**Limits.** The scratch copy needs free disk about the size of the compared columns of both sides: compare a
+slice of a huge table with the WHERE filters. Each side is read as it is at that moment, so rows changing during
+the compare show up as differences. Rows with a NULL key never match. If a key is not unique, each copy is matched
+with every copy on the other side (a note says so).
 
 ## Frontend
 

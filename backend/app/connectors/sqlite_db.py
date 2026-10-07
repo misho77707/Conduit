@@ -68,7 +68,7 @@ class SQLiteConnector(Connector):
             conn.close()
 
     def inspect(self, table: str) -> TableSchema:
-        _, _, name = table.partition(".")
+        name = table.partition(".")[2] or table  # "main.orders" or just "orders"
         conn = self._connect()
         try:
             escaped = name.replace('"', '""')

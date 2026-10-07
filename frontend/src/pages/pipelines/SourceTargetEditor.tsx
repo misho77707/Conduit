@@ -1,5 +1,5 @@
-import { useState } from "react";
-import type { ConnectionOut, SourceIn, TargetIn } from "../../lib/api";
+import { useEffect, useId, useState } from "react";
+import { connectionsApi, type ConnectionOut, type SourceIn, type TargetIn } from "../../lib/api";
 import { Field } from "../../ui/Field";
 import { Input, Select, TextArea } from "../../ui/Input";
 import { SegmentedControl } from "../../ui/SegmentedControl";
@@ -12,6 +12,13 @@ export function SourceEditor({ value, onChange, conns }: { value: SourceIn; onCh
   const kind = isFile ? "file" : "database";
   const view = value.query != null ? "query" : "table";
   const conn = conns.find((c) => c.id === value.connection_id);
+  const [tables, setTables] = useState<string[]>([]);
+  const listId = useId();
+
+  useEffect(() => {  // table names for the Table field's suggestions
+    setTables([]);
+    if (value.connection_id) connectionsApi.tables(value.connection_id).then((ts) => setTables(ts.map((t) => t.name))).catch(() => {});
+  }, [value.connection_id]);
 
   function setKind(k: "database" | "file") {
     if (k === "file") onChange({ file: { path: "", header: true, encoding: "utf-8", skip_rows: 0, null_values: [""] }, where: "" });
@@ -35,7 +42,10 @@ export function SourceEditor({ value, onChange, conns }: { value: SourceIn; onCh
           </Field>
           <SegmentedControl small options={[{ id: "table", label: "Table" }, { id: "query", label: "SQL query" }].filter((o) => o.id === "table" || conn?.type !== "mongodb")} value={view} onChange={(v) => onChange(v === "query" ? { connection_id: value.connection_id, query: "", where: "" } : { connection_id: value.connection_id, table: "", where: "" })} />
           {view === "table" ? (
-            <Field label="Table"><Input value={value.table || ""} onChange={(e) => onChange({ ...value, table: e.target.value, query: null })} placeholder="public.orders" /></Field>
+            <Field label="Table">
+              <Input list={listId} value={value.table || ""} onChange={(e) => onChange({ ...value, table: e.target.value, query: null })} placeholder={tables[0] || "public.orders"} />
+              <datalist id={listId}>{tables.map((t) => <option key={t} value={t} />)}</datalist>
+            </Field>
           ) : (
             <Field label="Query"><TextArea rows={3} value={value.query || ""} onChange={(e) => onChange({ ...value, query: e.target.value, table: null })} placeholder="SELECT * FROM public.orders" /></Field>
           )}

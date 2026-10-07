@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     job_runner: str = "celery"  # celery | thread (thread: run jobs inside the API process; for local dev and tests)
     keep_finished_jobs: int = 10  # only the latest finished jobs are kept: no history
     max_workers_per_job: int = 32
+    keep_comparisons: int = 10  # only the latest finished source/target comparisons (and their result files) are kept
 
     # Monitor
     monitor_disks: str = ""  # extra disks to show: "path[:label],path[:label]" (paths as seen inside the container)
@@ -51,6 +52,10 @@ class Settings(BaseSettings):
     @property
     def rejects_dir(self) -> str:
         return f"{self.data_dir.rstrip('/')}/rejects"
+
+    @property
+    def compare_dir(self) -> str:
+        return f"{self.data_dir.rstrip('/')}/compare"
 
     @property
     def cors_list(self) -> list[str]:

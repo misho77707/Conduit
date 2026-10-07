@@ -10,18 +10,16 @@ from sqlalchemy.orm import Session
 from ..db import get_session
 from ..deps import current_user
 from ..engine import joblog
-from ..engine.adapters import get_adapter
 from ..engine.arrowconv import _jsonable
-from ..engine.filesource import FileAdapter, FileSpec
 from ..engine.model import ReadRequest
 from ..engine.runner import JobError, prepare, short_error, snapshot
 from ..engine.schedule import ScheduleError, next_after, validate_cron
+from ..engine.sources import SourceUnavailable, raw_columns, source_adapter
 from ..engine.spec import JobIn, OptionsIn, SourceIn, StepIn, StepOutCol, TargetIn
 from ..engine.steps import StepError, apply_steps, compile_steps, infer_colspecs
 from ..engine.types import to_arrow
-from ..models import Connection, Job, Pipeline, User, utcnow
+from ..models import Job, Pipeline, User, utcnow
 from ..schemas import PipelineIn, PipelineLastRunOut, PipelineOut, PipelinePatch, PipelinePreviewIn, PipelinePreviewOut
-from ..services import build_connector
 from .jobs import _dispatch
 
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
@@ -145,31 +143,6 @@ def _validate_shape(source: dict, target: dict, options: dict, steps: list) -> N
 
 # ---- preview ---------------------------------------------------------------------
 
-def _source_adapter(session: Session, s: SourceIn):
-    if s.file:
-        return FileAdapter(FileSpec(**s.file.model_dump()))
-    conn = session.get(Connection, s.connection_id) if s.connection_id else None
-    if conn is None:
-        raise HTTPException(422, "The source connection no longer exists")
-    return get_adapter(build_connector(conn))
-
-
-def _raw_columns(src: Any, s: SourceIn) -> list:
-    if isinstance(src, FileAdapter):
-        return src.read_columns()
-    if s.table:
-        cols = src.table_columns(s.table)
-        if not cols:
-            raise HTTPException(422, f"Source table {s.table} was not found (or has no columns)")
-        return cols
-    try:
-        return src.query_columns(s.query or "")
-    except NotImplementedError as e:
-        raise HTTPException(422, str(e)) from e
-    except Exception as e:  # noqa: BLE001 - driver / network error while probing the source
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"The source query does not run: {short_error(e)}") from e
-
-
 def _rows_json(table: pa.Table, n: int) -> list[dict[str, Any]]:
     return [{k: (None if v is None else _jsonable(v) if not isinstance(v, (int, float, str, bool)) else v) for k, v in r.items()}
             for r in table.slice(0, n).to_pylist()]
@@ -177,8 +150,13 @@ def _rows_json(table: pa.Table, n: int) -> list[dict[str, Any]]:
 
 def _preview(session: Session, p: Pipeline, sample_rows: int, upto_step: str | None) -> dict[str, Any]:
     s = SourceIn(**p.source)
-    src = _source_adapter(session, s)
-    raw_cols = _raw_columns(src, s)
+    try:
+        src = source_adapter(session, s)
+        raw_cols = raw_columns(src, s)
+    except SourceUnavailable as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e)) from e
+    except JobError as e:
+        raise HTTPException(422, str(e)) from e
     req = ReadRequest(table=s.table, query=s.query, where=s.where, columns=raw_cols, mode="full")
     try:
         splits = src.plan_splits(req, 1)

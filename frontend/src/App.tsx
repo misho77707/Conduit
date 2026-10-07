@@ -11,6 +11,7 @@ import { Monitor } from "./pages/Monitor";
 import { Pipelines } from "./pages/Pipelines";
 import { Builder } from "./pages/pipelines/Builder";
 import { ComingSoon } from "./pages/ComingSoon";
+import { Compare } from "./pages/Compare";
 
 function Private({ children }: { children: JSX.Element }) {
   const { user, loading } = useAuth();
@@ -47,6 +48,8 @@ export default function App() {
                         <Route path="/monitor" element={<Monitor />} />
                         <Route path="/pipelines" element={<Pipelines />} />
                         <Route path="/pipelines/:id" element={<Builder />} />
+                        <Route path="/compare" element={<Compare />} />
+                        <Route path="/compare/:id" element={<Compare />} />
                         <Route path="/control" element={<ComingSoon title="Control & Setup" icon="tune" note="Environment setup, tool management and secrets. Coming later." />} />
                         <Route path="*" element={<Navigate to="/connections" replace />} />
                       </Routes>

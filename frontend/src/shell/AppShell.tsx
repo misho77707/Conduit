@@ -12,13 +12,14 @@ const DATA_NAV = [
   { id: "upload", label: "Upload & Load", icon: "upload_file" },
   { id: "jobs", label: "Jobs", icon: "bolt" },
   { id: "pipelines", label: "Pipelines", icon: "account_tree" },
+  { id: "compare", label: "Compare", icon: "difference" },
 ];
 const OPS_NAV = [
   { id: "monitor", label: "Monitor", icon: "monitor_heart" },
   { id: "control", label: "Control & Setup", icon: "tune", soon: true },
 ];
 const TITLES: Record<string, string> = {
-  connections: "Connections", upload: "Upload & Load", jobs: "Jobs", pipelines: "Pipelines",
+  connections: "Connections", upload: "Upload & Load", jobs: "Jobs", pipelines: "Pipelines", compare: "Compare",
   monitor: "Monitor", control: "Control & Setup",
 };
 

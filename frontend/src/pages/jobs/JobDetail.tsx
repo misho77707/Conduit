@@ -106,6 +106,9 @@ export function JobDetail({ jobId, onChanged }: { jobId: string; onChanged: () =
         {(job.status === "failed" || job.status === "cancelled" || job.status === "stalled") && (
           <Button variant="primary" icon="replay" disabled={busy} onClick={retry}>Retry</Button>
         )}
+        {job.kind !== "pipeline" && !active && (
+          <Button icon="difference" onClick={() => nav("/compare", { state: { fromJobId: job.id } })} title="Compare this load's source with its target">Verify</Button>
+        )}
         {job.kind !== "pipeline" && (
           <Button icon="edit" onClick={() => nav("/upload", { state: { fromJobId: job.id } })} title="Open this load in Upload & Load with every setting filled in">Edit &amp; re-run</Button>
         )}

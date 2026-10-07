@@ -41,3 +41,11 @@ def run_job_task(job_id: str) -> str:
     from ..engine.runner import run_job
 
     return run_job(job_id)
+
+
+@celery_app.task(name="conduit.compare.run")
+def run_comparison_task(comparison_id: str) -> str:
+    """Compare a source with a target and store the differences (latest few comparisons only)."""
+    from ..compare.engine import run_comparison
+
+    return run_comparison(comparison_id)

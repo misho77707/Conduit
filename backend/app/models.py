@@ -197,3 +197,28 @@ class Pipeline(Base):
     owner_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class Comparison(Base):
+    """One source-vs-target data comparison. Result rows live in <data>/compare/<id>/results.duckdb, not here."""
+
+    __tablename__ = "comparisons"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(200), default="")
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)  # queued | running | succeeded | failed | cancelled
+    phase: Mapped[str] = mapped_column(String(80), default="")  # what it is doing right now, shown while running
+    spec: Mapped[dict] = mapped_column(JsonType, default=dict)  # compare.spec.CompareIn
+    summary: Mapped[dict | None] = mapped_column(JsonType, nullable=True)  # counts, columns, keys, notes
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rows_source: Mapped[int] = mapped_column(BigInteger, default=0)  # rows read so far
+    rows_target: Mapped[int] = mapped_column(BigInteger, default=0)
+    cancel_requested: Mapped[bool] = mapped_column(default=False)
+    celery_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)  # the load it verifies, when started from a job
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
