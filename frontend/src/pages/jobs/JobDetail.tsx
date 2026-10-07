@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { jobsApi, type JobDetail as JobDetailT } from "../../lib/api";
 import { useToast } from "../../lib/toast";
 import { fmtEta, fmtN, statusBadge } from "../../lib/format";
@@ -22,6 +23,7 @@ function elapsedLabel(startedAt: string | null, finishedAt: string | null): stri
 
 export function JobDetail({ jobId, onChanged }: { jobId: string; onChanged: () => void }) {
   const toast = useToast();
+  const nav = useNavigate();
   const [job, setJob] = useState<JobDetailT | null>(null);
   const [cancelAsk, setCancelAsk] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -103,6 +105,9 @@ export function JobDetail({ jobId, onChanged }: { jobId: string; onChanged: () =
         )}
         {(job.status === "failed" || job.status === "cancelled" || job.status === "stalled") && (
           <Button variant="primary" icon="replay" disabled={busy} onClick={retry}>Retry</Button>
+        )}
+        {job.kind !== "pipeline" && (
+          <Button icon="edit" onClick={() => nav("/upload", { state: { fromJobId: job.id } })} title="Open this load in Upload & Load with every setting filled in">Edit &amp; re-run</Button>
         )}
         {!active && (
           <Button variant="ghost" icon="delete" onClick={remove}>Remove</Button>

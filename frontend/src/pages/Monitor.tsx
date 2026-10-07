@@ -5,7 +5,8 @@ import { useToast } from "../lib/toast";
 import { useTheme } from "../lib/theme";
 import { dbTile, fmtEta, fmtN, relativeTime, statusBadge } from "../lib/format";
 import { Icon } from "../ui/Icon";
-import { Button, IconButton } from "../ui/Button";
+import { Button } from "../ui/Button";
+import { RowMenu } from "../ui/RowMenu";
 import { StatusBadge } from "../ui/Badge";
 import { ProgressBar } from "../ui/ProgressBar";
 import { ServiceCheckModal } from "./monitor/ServiceCheckModal";
@@ -19,7 +20,6 @@ export function Monitor() {
   const [snap, setSnap] = useState<MonitorSnapshot | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
-  const [menuFor, setMenuFor] = useState<string | null>(null);
   const busy = useRef<Set<string>>(new Set());
 
   const load = () => monitorApi.get().then(setSnap).catch(() => {});
@@ -38,20 +38,17 @@ export function Monitor() {
 
   async function runNow(c: CheckOut) {
     busy.current.add(c.id);
-    setMenuFor(null);
     try { await monitorApi.runCheck(c.id); await load(); }
     catch (e) { toast("err", `${c.name}: run failed`, e instanceof Error ? e.message : undefined); }
     finally { busy.current.delete(c.id); }
   }
 
   async function toggleEnabled(c: CheckOut) {
-    setMenuFor(null);
     try { await monitorApi.updateCheck(c.id, { enabled: !c.enabled }); await load(); }
     catch (e) { toast("err", "Could not update the check", e instanceof Error ? e.message : undefined); }
   }
 
   async function remove(c: CheckOut) {
-    setMenuFor(null);
     if (!confirm(`Delete the check "${c.name}"?`)) return;
     try { await monitorApi.deleteCheck(c.id); await load(); }
     catch (e) { toast("err", "Could not delete the check", e instanceof Error ? e.message : undefined); }
@@ -180,14 +177,11 @@ export function Monitor() {
                 </div>
                 <span style={{ justifySelf: "end" }}><StatusBadge b={b} size="sm" /></span>
                 <div style={{ justifySelf: "end", position: "relative" }}>
-                  <IconButton icon="more_horiz" title="More" onClick={() => setMenuFor(menuFor === s.id ? null : s.id)} size={24} />
-                  {menuFor === s.id && (
-                    <div style={{ position: "absolute", right: 0, top: 26, width: 150, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, boxShadow: "var(--shadow-2)", padding: 4, zIndex: 5, display: "flex", flexDirection: "column" }}>
-                      <MenuBtn icon="bolt" label="Run now" onClick={() => runNow(s)} />
-                      <MenuBtn icon={s.enabled ? "pause" : "play_arrow"} label={s.enabled ? "Disable" : "Enable"} onClick={() => toggleEnabled(s)} />
-                      <MenuBtn icon="delete" label="Delete" tone="var(--err)" onClick={() => remove(s)} />
-                    </div>
-                  )}
+                  <RowMenu size={24} width={150} items={[
+                    { icon: "bolt", label: "Run now", onClick: () => runNow(s) },
+                    { icon: s.enabled ? "pause" : "play_arrow", label: s.enabled ? "Disable" : "Enable", onClick: () => toggleEnabled(s) },
+                    { icon: "delete", label: "Delete", tone: "var(--err)", onClick: () => remove(s) },
+                  ]} />
                 </div>
               </div>
             );
@@ -206,13 +200,5 @@ function Stat({ label, value }: { label: string; value: string }) {
       <div style={{ fontSize: 12, color: "var(--text-3)" }}>{label}</div>
       <div style={{ fontFamily: "'Geist Mono',monospace", fontSize: 22 }}>{value}</div>
     </div>
-  );
-}
-
-function MenuBtn({ icon, label, onClick, tone }: { icon: string; label: string; onClick: () => void; tone?: string }) {
-  return (
-    <button onClick={onClick} className="hover-surface2" style={{ height: 30, display: "flex", alignItems: "center", gap: 8, padding: "0 8px", border: "none", background: "transparent", borderRadius: 5, cursor: "pointer", textAlign: "left", color: tone || "var(--text-2)" }}>
-      <Icon name={icon} style={{ fontSize: 16 }} />{label}
-    </button>
   );
 }

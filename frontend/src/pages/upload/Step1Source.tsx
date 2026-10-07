@@ -141,16 +141,26 @@ function ServerTab({ s, onPick }: { s: WizardState; onPick: (path: string, name:
   const toast = useToast();
   const [path, setPath] = useState("");
   const [entries, setEntries] = useState<FileEntry[] | null>(null);
+  const [roots, setRoots] = useState<string[]>([]);
 
   const load = (p: string) => filesApi.list(p).then((es) => { setEntries(es); setPath(p); }).catch((e) => toast("err", "Could not list folder", e.message));
 
-  useEffect(() => { load(""); }, []);
+  useEffect(() => {
+    load("");
+    filesApi.roots().then(setRoots).catch(() => {});
+  }, []);
+
+  const norm = (p: string) => p.replace(/[\\/]+$/, "");
+  const inside = (p: string) => roots.some((r) => { const n = norm(p), rn = norm(r); return n === rn || n.startsWith(rn + "/") || n.startsWith(rn + "\\"); });
+  // "" is the default folder (the data dir); an allowed root itself has nowhere further up to go.
+  const atTop = !path || roots.some((r) => norm(r) === norm(path));
 
   const parent = () => {
     const sep = path.includes("\\") ? "\\" : "/";
     const parts = path.split(sep).filter(Boolean);
     parts.pop();
-    load(parts.join(sep) || sep);
+    const up = (path.startsWith(sep) ? sep : "") + parts.join(sep);
+    load(up && inside(up) ? up : "");
   };
 
   return (
@@ -163,7 +173,7 @@ function ServerTab({ s, onPick }: { s: WizardState; onPick: (path: string, name:
         <div style={{ display: "grid", gridTemplateColumns: "28px minmax(0,1fr) 90px 100px 130px", gap: 12, padding: "0 14px", height: 32, alignItems: "center", fontSize: 12, color: "var(--text-3)", fontWeight: 500, borderBottom: "1px solid var(--border)" }}>
           <span /><span>File</span><span>Format</span><span>Size</span><span>Modified</span>
         </div>
-        {path && (
+        {!atTop && (
           <button onClick={parent} className="hover-surface2" style={{ width: "100%", display: "grid", gridTemplateColumns: "28px minmax(0,1fr) 90px 100px 130px", gap: 12, padding: "0 14px", height: 34, alignItems: "center", border: "none", borderBottom: "1px solid var(--border)", background: "transparent", cursor: "pointer", textAlign: "left" }}>
             <Icon name="arrow_upward" style={{ fontSize: 15, color: "var(--text-3)" }} /><span style={{ fontFamily: "'Geist Mono',monospace", fontSize: 12, color: "var(--text-2)" }}>..</span><span /><span /><span />
           </button>

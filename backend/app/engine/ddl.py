@@ -37,6 +37,39 @@ class TargetOptions:
     order_by: list[str] = field(default_factory=list)  # ClickHouse ORDER BY (defaults from keys / time+id columns)
     partition_by: str | None = None  # ClickHouse partition expression, e.g. toYYYYMM(posted_at)
     est_rows: int | None = None
+    ddl: list[str] | None = None  # user-edited statements that replace the generated CREATE ones (new tables only)
+
+
+def split_statements(sql: str) -> list[str]:
+    """Split SQL text on semicolons that are outside quotes and comments; empty statements are dropped."""
+    out: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    i = 0
+    while i < len(sql):
+        ch = sql[i]
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+        elif ch in "'\"`":
+            quote = ch
+            buf.append(ch)
+        elif sql.startswith("--", i):
+            end = sql.find("\n", i)
+            end = len(sql) if end < 0 else end
+            buf.append(sql[i:end])
+            i = end
+            continue
+        elif ch == ";":
+            out.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    out.append("".join(buf))
+    return [s.strip() for s in out if s.strip() and not all(ln.strip().startswith("--") or not ln.strip()
+                                                            for ln in s.splitlines())]
 
 
 def default_clickhouse_order(cols: list[ColSpec], keys: list[str]) -> list[str]:

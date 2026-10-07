@@ -69,11 +69,13 @@ class PostgresAdapter(Adapter):
     def table_columns(self, table: str) -> list[ColSpec]:
         schema, name = split_name(table)
         rows = self._rows(
-            "select a.attname, format_type(a.atttypid, a.atttypmod), not a.attnotnull "
+            "select a.attname, format_type(a.atttypid, a.atttypmod), not a.attnotnull, "
+            "case when a.attidentity <> '' then 'identity' else pg_get_expr(d.adbin, d.adrelid) end "
             "from pg_attribute a join pg_class c on c.oid = a.attrelid join pg_namespace n on n.oid = c.relnamespace "
+            "left join pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum "
             "where n.nspname = %s and c.relname = %s and a.attnum > 0 and not a.attisdropped order by a.attnum",
             [schema or "public", name])
-        return [ColSpec(a, normalize("postgres", t), nullable) for a, t, nullable in rows]
+        return [ColSpec(a, normalize("postgres", t), nullable, default=d) for a, t, nullable, d in rows]
 
     def query_columns(self, sql: str) -> list[ColSpec]:
         with self.c._connect() as conn, conn.cursor() as cur:
@@ -215,7 +217,9 @@ class PostgresAdapter(Adapter):
         schema, _ = split_name(table)
         existing = self.table_columns(table)
         stmts: list[str] = []
-        if not existing and create:
+        if not existing and create and opts.ddl:
+            stmts += opts.ddl
+        elif not existing and create:
             if schema:
                 stmts.append(f"CREATE SCHEMA IF NOT EXISTS {qi('postgres', schema)}")
             stmts.append(create_table_sql("postgres", table, cols, keys, mode, opts))

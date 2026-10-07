@@ -4,6 +4,7 @@ import { dbTile, statusBadge } from "../../lib/format";
 import { highlight } from "../../lib/highlight";
 import { Icon } from "../../ui/Icon";
 import { Card } from "../../ui/Card";
+import { Button } from "../../ui/Button";
 import { Input, Select } from "../../ui/Input";
 import { SegmentedControl } from "../../ui/SegmentedControl";
 import { ToggleRow } from "../../ui/Toggle";
@@ -41,6 +42,8 @@ export function Step3Target({ s, set, ctx }: Props) {
   }, [s.targetConnId, s.targetTable, s.tableMode, s.mode, JSON.stringify(s.keys), JSON.stringify(s.columns)]);
 
   const included = s.columns.filter((c) => c.include);
+  const editing = !mongo && s.tableMode === "new" && s.ddlText != null;
+  const canEditDdl = !mongo && s.tableMode === "new" && !!s.plan && !s.plan.target_exists && s.plan.ddl.length > 0;
   const updCol = (i: number, patch: Partial<ColumnMapUI>) => set({ columns: s.columns.map((c, j) => (j === i ? { ...c, ...patch } : c)) });
 
   return (
@@ -52,7 +55,7 @@ export function Step3Target({ s, set, ctx }: Props) {
             const tile = dbTile(c.type, ctx.dark);
             const on = c.id === s.targetConnId;
             return (
-              <button key={c.id} onClick={() => set({ targetConnId: c.id, targetTable: "" })} className="hover-surface2" style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", border: "none", borderBottom: "1px solid var(--border)", background: on ? "var(--accent-soft)" : "transparent", cursor: "pointer", textAlign: "left" }}>
+              <button key={c.id} onClick={() => set({ targetConnId: c.id, targetTable: "", ddlText: null })} className="hover-surface2" style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", border: "none", borderBottom: "1px solid var(--border)", background: on ? "var(--accent-soft)" : "transparent", cursor: "pointer", textAlign: "left" }}>
                 <span style={{ width: 14, height: 14, borderRadius: "50%", border: `1.5px solid ${on ? "var(--accent)" : "var(--border-2)"}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{on && <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--accent)" }} />}</span>
                 <span style={{ width: 24, height: 24, borderRadius: 5, background: tile.tbg, color: tile.tfg, fontFamily: "'Geist Mono',monospace", fontSize: 10, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{ctx.dbTypes[c.type]?.abbr}</span>
                 <span style={{ flex: 1, minWidth: 0 }}>
@@ -71,7 +74,7 @@ export function Step3Target({ s, set, ctx }: Props) {
               <div style={{ fontWeight: 600 }}>Destination</div>
               {!mongo ? (
                 <>
-                  <SegmentedControl options={[{ id: "new", label: "Create new table" }, { id: "existing", label: "Existing table" }]} value={s.tableMode} onChange={(id) => set({ tableMode: id, targetTable: "" })} />
+                  <SegmentedControl options={[{ id: "new", label: "Create new table" }, { id: "existing", label: "Existing table" }]} value={s.tableMode} onChange={(id) => set({ tableMode: id, targetTable: "", ddlText: null })} />
                   {s.tableMode === "new" ? (
                     <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                       <span style={{ fontSize: 12, fontWeight: 500, color: "var(--text-2)" }}>New table name <span style={{ fontWeight: 400, color: "var(--text-3)" }}>· include a schema, e.g. public.orders</span></span>
@@ -140,11 +143,32 @@ export function Step3Target({ s, set, ctx }: Props) {
 
       <Card style={{ position: "sticky", top: 16, overflow: "hidden" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 14px" }}>
-          <div style={{ fontWeight: 600, flex: 1 }}>{mongo ? "Target preview" : "Generated DDL"}</div>
+          <div style={{ fontWeight: 600, flex: 1 }}>{mongo ? "Target preview" : editing ? "Edited DDL" : "Generated DDL"}</div>
           {s.planLoading && <Icon name="progress_activity" spin style={{ fontSize: 16, color: "var(--text-3)" }} />}
+          {canEditDdl && !editing && (
+            <Button height={28} padX={10} icon="edit" style={{ fontSize: 12 }} onClick={() => set({ ddlText: s.plan!.ddl.map((d) => `${d};`).join("\n\n") })}>Edit</Button>
+          )}
+          {editing && (
+            <Button height={28} padX={10} icon="restart_alt" style={{ fontSize: 12 }} onClick={() => set({ ddlText: null })}>Reset to generated</Button>
+          )}
         </div>
         {s.planError && <div style={{ padding: "0 14px 14px", color: "var(--err)", fontSize: 12 }}>{s.planError}</div>}
-        {s.plan && (
+        {editing && (
+          <div style={{ borderTop: "1px solid var(--border)" }}>
+            <textarea
+              value={s.ddlText!}
+              onChange={(e) => set({ ddlText: e.target.value })}
+              spellCheck={false}
+              rows={16}
+              style={{ display: "block", width: "100%", padding: "12px 14px", border: "none", background: "var(--code-bg)", color: "var(--text)", outline: "none", fontFamily: "'Geist Mono',monospace", fontSize: 12, lineHeight: "20px", resize: "vertical" }}
+            />
+            <div style={{ padding: "8px 14px", fontSize: 12, color: "var(--text-3)", borderTop: "1px solid var(--border)" }}>
+              These statements run instead of the generated ones when the table is created (separate them with <code>;</code>).
+              Keep the table name and the loaded column names as they are; column changes above no longer update this text.
+            </div>
+          </div>
+        )}
+        {s.plan && !editing && (
           <div style={{ background: "var(--code-bg)", borderTop: "1px solid var(--border)", padding: "12px 0", fontFamily: "'Geist Mono',monospace", fontSize: 12, lineHeight: "20px", overflow: "auto", maxHeight: 420 }}>
             {(s.plan.ddl.length ? highlight(s.plan.ddl.join("\n\n"), "sql") : highlight(mongo ? "-- rows are inserted as flat documents; field names match your column names" : "-- no DDL: writing into the existing table", "sql")).map((ln) => (
               <div key={ln.n} style={{ display: "flex", whiteSpace: "pre", minHeight: 20 }}>

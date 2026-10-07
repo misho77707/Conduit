@@ -115,6 +115,7 @@ def _detail(session: Session, job: Job, log_lines: int = 40) -> dict[str, Any]:
     snap["splits"] = [{"idx": s.idx, "label": s.label, "status": s.status, "est_rows": s.est_rows, "rows_written": s.rows_written,
                        "rows_rejected": s.rows_rejected, "attempts": s.attempts, "error": s.error} for s in splits]
     snap["plan"] = job.plan
+    snap["spec"] = job.spec  # the original request, so the wizard can reopen it for editing
     snap["log"] = joblog.tail(job.id, log_lines)
     return snap
 

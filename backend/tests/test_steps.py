@@ -72,6 +72,16 @@ def test_python_step_transform():
     assert out.column("b").to_pylist() == [2, 4, 6]
 
 
+def test_python_step_has_pd_and_np_without_importing():
+    code = ("def transform(df):\n"
+            "    df['size'] = np.where(df['a'] > 1, 'big', 'small')\n"
+            "    df['d'] = pd.to_datetime(df['s'], errors='coerce')\n"
+            "    return df\n")
+    out = apply_steps([Step("s1", "python", {"code": code})], _t(a=[1, 2], s=["2024-01-02", "nope"]))
+    assert out.column("size").to_pylist() == ["small", "big"]
+    assert out.column("d").null_count == 1
+
+
 def test_python_step_must_define_transform():
     with pytest.raises(StepError, match="transform"):
         apply_steps([Step("s1", "python", {"code": "x = 1\n"})], _t(a=[1]))

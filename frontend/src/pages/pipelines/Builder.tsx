@@ -36,6 +36,9 @@ export function Builder() {
   const [preview, setPreview] = useState<PipelinePreviewOut | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  // The step the last preview stopped at. Kept until a preview runs through that step again cleanly, so the
+  // sidebar still flags it while an earlier step is selected (whose preview never reaches it).
+  const [stepError, setStepError] = useState<{ id: string; message: string } | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [scheduleOpen, setScheduleOpen] = useState(false);
   const [running, setRunning] = useState(false);
@@ -74,13 +77,20 @@ export function Builder() {
         if (myReq !== reqId.current) return;
         setPipeline(saved);
         try {
-          const p = await pipelinesApi.preview(id, 50, uptoStepFor(selected, draft.steps));
+          const upto = uptoStepFor(selected, draft.steps);
+          const p = await pipelinesApi.preview(id, 50, upto);
           if (myReq !== reqId.current) return;
           setPreview(p);
           if (p.full_chain) setPipeline((cur) => (cur ? { ...cur, output_columns: p.columns } : cur));
+          const ids = draft.steps.map((s) => s.id);
+          const ranThrough = upto === null ? ids.length - 1 : ids.indexOf(upto);
+          setStepError((cur) => {
+            if (p.error && p.error_step) return { id: p.error_step, message: p.error };
+            return cur && ids.includes(cur.id) && ids.indexOf(cur.id) > ranThrough ? cur : null;
+          });
         } catch (e) {
           if (myReq !== reqId.current) return;
-          setPreview(null);
+          // keep the last table on screen (marked stale) rather than blanking the panel
           setPreviewError(e instanceof Error ? e.message : "Preview failed");
         }
       } catch (e) {
@@ -130,6 +140,12 @@ export function Builder() {
       // sidebar alone would leave /run permanently blocked after perfectly ordinary editing.
       const p = await pipelinesApi.preview(id!, 10, null);
       setPreview((cur) => (selected === "target" ? p : cur));
+      if (p.error && p.error_step) {
+        setStepError({ id: p.error_step, message: p.error });
+        setSelected(p.error_step);
+        toast("err", "Fix the highlighted step first", p.error);
+        return;
+      }
       setPipeline((cur) => (cur ? { ...cur, output_columns: p.columns } : cur));
       const job = await pipelinesApi.run(id!);
       nav(`/jobs/${job.id}`);
@@ -142,6 +158,12 @@ export function Builder() {
 
   const selectedStep = draft.steps.find((s) => s.id === selected);
   const canRun = !running;
+  const incomplete = !!previewError || !!preview?.error;
+  const stepNo = (stepId: string | null) => draft.steps.findIndex((s) => s.id === stepId) + 1;
+  const stepLabel = (stepId: string | null) => {
+    const s = draft.steps.find((x) => x.id === stepId);
+    return s ? STEP_META[s.kind].label : "step";
+  };
 
   return (
     <div style={{ padding: "16px 20px 32px", display: "flex", flexDirection: "column", gap: 14 }}>
@@ -180,7 +202,7 @@ export function Builder() {
             active={selected === "source"} onClick={() => setSelected("source")} />
           {draft.steps.map((s) => (
             <SidebarItem key={s.id} icon={STEP_META[s.kind].icon} title={STEP_META[s.kind].label} sub={stepSummary(s)} mode={STEP_META[s.kind].group === "code" ? s.kind.toUpperCase() : "Visual"}
-              active={selected === s.id} onClick={() => setSelected(s.id)} />
+              active={selected === s.id} onClick={() => setSelected(s.id)} error={stepError?.id === s.id ? stepError.message : undefined} />
           ))}
           <div style={{ position: "relative", padding: "4px 0 8px 0" }}>
             <button onClick={() => setAddMenu((v) => !v)} style={{ height: 28, padding: "0 10px", borderRadius: 6, border: "1px dashed var(--border-2)", background: "var(--surface)", color: "var(--text-2)", fontSize: 12, fontWeight: 500, display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
@@ -225,6 +247,7 @@ export function Builder() {
           {selectedStep && (
             <>
               <PanelHeader icon={STEP_META[selectedStep.kind].icon} title={STEP_META[selectedStep.kind].label} mode={selectedStep.kind.toUpperCase()} onRemove={() => removeStep(selectedStep.id)} />
+              {stepError?.id === selectedStep.id && <ErrorNote text={stepError.message} />}
               <div style={{ padding: 14 }}>
                 <StepEditor key={selectedStep.id} step={selectedStep} onChange={(cfg) => updateStepConfig(selectedStep.id, cfg)} inputColumns={inputColumnsBefore(selectedStep.id)} />
               </div>
@@ -233,17 +256,25 @@ export function Builder() {
         </div>
 
         {/* Preview panel */}
-        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 14px", borderBottom: "1px solid var(--border)", flexWrap: "wrap" }}>
+        <div style={{ background: "var(--surface)", border: `1px solid ${incomplete ? "var(--err)" : "var(--border)"}`, boxShadow: incomplete ? "0 0 0 3px var(--err-soft)" : "none", borderRadius: 8, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 14px", borderBottom: `1px solid ${incomplete ? "var(--err)" : "var(--border)"}`, flexWrap: "wrap" }}>
             <span style={{ fontWeight: 600 }}>Preview</span>
-            <span style={{ fontSize: 12, color: "var(--text-3)" }}>{selected === "target" ? "final output" : selected === "source" ? "source columns" : "after this step"}</span>
+            <span style={{ fontSize: 12, color: incomplete ? "var(--err)" : "var(--text-3)" }}>
+              {previewError ? "last good result" : preview?.error ? `stopped before step ${stepNo(preview.error_step)}` : selected === "target" ? "final output" : selected === "source" ? "source columns" : "after this step"}
+            </span>
             <div style={{ flex: 1 }} />
             {previewLoading && <Icon name="progress_activity" spin style={{ fontSize: 16, color: "var(--text-3)" }} />}
             {preview && !previewLoading && <span style={{ fontFamily: "'Geist Mono',monospace", fontSize: 11, color: "var(--text-2)" }}>{preview.sampled_rows} sample row{preview.sampled_rows === 1 ? "" : "s"} · {preview.columns.length} cols</span>}
           </div>
-          {previewError && <div style={{ padding: 14, color: "var(--err)", fontSize: 12 }}>{previewError}</div>}
-          {preview && !previewError && (
-            <div style={{ overflow: "auto", maxHeight: 560 }}>
+          {(previewError || preview?.error) && (
+            <ErrorNote
+              text={previewError || `Step ${stepNo(preview!.error_step)} (${stepLabel(preview!.error_step)}): ${preview!.error}`}
+              sub={previewError ? (preview ? "Showing the last preview that worked." : undefined) : "The table below is the output just before that step, so it is not the complete result yet."}
+              onClick={!previewError && preview?.error_step ? () => setSelected(preview.error_step!) : undefined}
+            />
+          )}
+          {preview && (
+            <div style={{ overflow: "auto", maxHeight: 560, opacity: previewError ? 0.55 : 1 }}>
               <table style={{ borderCollapse: "separate", borderSpacing: 0, fontSize: 12, minWidth: "100%" }}>
                 <thead>
                   <tr>
@@ -278,11 +309,12 @@ export function Builder() {
   );
 }
 
-function SidebarItem({ icon, title, sub, mode, active, onClick }: { icon: string; title: string; sub: string; mode: string; active: boolean; onClick: () => void }) {
+function SidebarItem({ icon, title, sub, mode, active, onClick, error }: { icon: string; title: string; sub: string; mode: string; active: boolean; onClick: () => void; error?: string }) {
+  const edge = error ? "var(--err)" : active ? "var(--accent)" : "transparent";
   return (
-    <button onClick={onClick} className="hover-surface2" style={{ position: "relative", width: "100%", display: "flex", alignItems: "flex-start", gap: 10, padding: 6, marginBottom: 4, borderRadius: 7, border: `1px solid ${active ? "var(--accent)" : "transparent"}`, background: active ? "var(--accent-soft)" : "transparent", cursor: "pointer", textAlign: "left" }}>
-      <span style={{ width: 20, height: 20, marginTop: 1, borderRadius: 5, background: active ? "var(--accent)" : "var(--surface-3)", color: active ? "var(--accent-fg)" : "var(--text-2)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-        <Icon name={icon} style={{ fontSize: 14 }} />
+    <button onClick={onClick} title={error} className="hover-surface2" style={{ position: "relative", width: "100%", display: "flex", alignItems: "flex-start", gap: 10, padding: 6, marginBottom: 4, borderRadius: 7, border: `1px solid ${edge}`, background: error ? "var(--err-soft)" : active ? "var(--accent-soft)" : "transparent", cursor: "pointer", textAlign: "left" }}>
+      <span style={{ width: 20, height: 20, marginTop: 1, borderRadius: 5, background: error ? "var(--err)" : active ? "var(--accent)" : "var(--surface-3)", color: error ? "#fff" : active ? "var(--accent-fg)" : "var(--text-2)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+        <Icon name={error ? "error" : icon} style={{ fontSize: 14 }} />
       </span>
       <span style={{ flex: 1, minWidth: 0 }}>
         <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -292,6 +324,18 @@ function SidebarItem({ icon, title, sub, mode, active, onClick }: { icon: string
         <span style={{ display: "block", fontFamily: "'Geist Mono',monospace", fontSize: 11, color: "var(--text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 2 }}>{sub}</span>
       </span>
     </button>
+  );
+}
+
+function ErrorNote({ text, sub, onClick }: { text: string; sub?: string; onClick?: () => void }) {
+  return (
+    <div onClick={onClick} style={{ display: "flex", gap: 8, padding: "10px 14px", background: "var(--err-soft)", borderBottom: "1px solid var(--err)", fontSize: 12, cursor: onClick ? "pointer" : "default" }}>
+      <Icon name="error" style={{ fontSize: 16, color: "var(--err)", flexShrink: 0 }} />
+      <div style={{ minWidth: 0 }}>
+        <div style={{ color: "var(--text)", overflowWrap: "anywhere" }}>{text}</div>
+        {sub && <div style={{ color: "var(--text-2)", marginTop: 2 }}>{sub}</div>}
+      </div>
+    </div>
   );
 }
 

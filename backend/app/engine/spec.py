@@ -68,6 +68,8 @@ class TargetIn(BaseModel):
     create: bool = True  # create the table when it does not exist
     order_by: list[str] = Field(default_factory=list)  # ClickHouse ORDER BY
     partition_by: str | None = Field(None, max_length=200)  # ClickHouse PARTITION BY expression
+    # Hand-edited CREATE statements (';'-separated) run instead of the generated DDL when the table is created
+    ddl: str | None = Field(None, max_length=100_000)
 
     @model_validator(mode="after")
     def _keys(self) -> "TargetIn":

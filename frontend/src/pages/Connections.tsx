@@ -5,6 +5,7 @@ import { useTheme } from "../lib/theme";
 import { useToast } from "../lib/toast";
 import { dbTile, relativeTime, statusBadge } from "../lib/format";
 import { Button, IconButton } from "../ui/Button";
+import { RowMenu } from "../ui/RowMenu";
 import { Icon } from "../ui/Icon";
 import { Input } from "../ui/Input";
 import { StatusBadge } from "../ui/Badge";
@@ -23,7 +24,6 @@ export function Connections() {
   const [testing, setTesting] = useState<Set<string>>(new Set());
   const [addOpen, setAddOpen] = useState(false);
   const [editing, setEditing] = useState<ConnectionOut | null>(null);
-  const [menuFor, setMenuFor] = useState<string | null>(null);
 
   const load = () => connectionsApi.list().then(setConns).catch(() => toast("err", "Could not load connections"));
 
@@ -153,17 +153,10 @@ export function Connections() {
                         {testing.has(c.id) ? "Testing…" : "Test"}
                       </Button>
                       <IconButton icon="upload" title="Load data into this connection" onClick={() => nav("/upload", { state: { targetConnId: c.id } })} />
-                      <IconButton icon="more_horiz" title="More" onClick={() => setMenuFor(menuFor === c.id ? null : c.id)} />
-                      {menuFor === c.id && (
-                        <div style={{ position: "absolute", right: 0, top: 32, width: 140, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, boxShadow: "var(--shadow-2)", padding: 4, zIndex: 5 }}>
-                          <button onClick={() => { setMenuFor(null); setEditing(c); }} className="hover-surface2" style={{ height: 30, width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "0 8px", border: "none", background: "transparent", borderRadius: 5, cursor: "pointer", textAlign: "left" }}>
-                            <Icon name="edit" style={{ fontSize: 16 }} />Edit
-                          </button>
-                          <button onClick={() => { setMenuFor(null); remove(c.id, c.name); }} className="hover-surface2" style={{ height: 30, width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "0 8px", border: "none", background: "transparent", borderRadius: 5, cursor: "pointer", textAlign: "left", color: "var(--err)" }}>
-                            <Icon name="delete" style={{ fontSize: 16 }} />Delete
-                          </button>
-                        </div>
-                      )}
+                      <RowMenu width={140} items={[
+                        { icon: "edit", label: "Edit", tone: "var(--text)", onClick: () => setEditing(c) },
+                        { icon: "delete", label: "Delete", tone: "var(--err)", onClick: () => remove(c.id, c.name) },
+                      ]} />
                     </div>
                   </div>
                 );
@@ -175,6 +168,7 @@ export function Connections() {
           </div>
         </>
       )}
+
 
       {addOpen && <AddConnectionModal initialTypes={Object.values(types)} onClose={() => setAddOpen(false)} onSaved={() => { setAddOpen(false); load(); }} />}
       {editing && <AddConnectionModal connection={editing} initialTypes={Object.values(types)} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} />}

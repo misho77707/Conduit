@@ -137,6 +137,7 @@ export interface FileEntry { name: string; path: string; is_dir: boolean; size_b
 export const filesApi = {
   inspect: (path: string, sampleRows = 20) => post<FileInspectOut>("/files/inspect", { path, sample_rows: sampleRows }),
   list: (path = "") => get<FileEntry[]>(`/files/list${path ? `?path=${encodeURIComponent(path)}` : ""}`),
+  roots: () => get<string[]>("/files/roots"),
   upload: (file: File, onProgress?: (pct: number) => void): Promise<{ path: string; name: string; size_bytes: number }> => {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
@@ -177,6 +178,7 @@ export interface SourceIn {
 export interface TargetIn {
   connection_id: string; table: string; mode: "append" | "replace" | "upsert"; keys: string[];
   create: boolean; order_by: string[]; partition_by?: string | null;
+  ddl?: string | null; // hand-edited CREATE statements, run instead of the generated DDL for a new table
 }
 export interface OptionsIn {
   strategy: "full" | "id" | "time" | "watermark"; split_column?: string | null; lo?: string | number | null;
@@ -215,6 +217,7 @@ export interface JobSplitOut {
 export interface JobLogLine { t: number; level: string; msg: string; }
 export interface JobDetail extends JobSnapshot {
   splits: JobSplitOut[]; plan: JobPlan | Record<string, unknown> | null; log: JobLogLine[];
+  spec: JobIn | null; // the request the job was created from
 }
 
 export const jobsApi = {
@@ -308,6 +311,8 @@ export interface PipelineOut {
 }
 export interface PipelinePreviewOut {
   columns: StepOutCol[]; rows: Record<string, unknown>[]; sampled_rows: number; full_chain: boolean;
+  // set when a step failed: columns/rows are then the output of the step before it
+  error: string | null; error_step: string | null;
 }
 
 export const pipelinesApi = {

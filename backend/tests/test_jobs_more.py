@@ -48,6 +48,51 @@ def test_sqlite_to_duckdb_and_back_with_parallel_readers(client, auth, env):
     c.close()
 
 
+def test_null_into_not_null_column_gets_its_default(client, auth, env):
+    c = sqlite3.connect(env / "src.sqlite")
+    c.execute("create table s(id integer, mins integer, tag text, strict_col integer)")
+    c.executemany("insert into s values (?,?,?,?)", [(1, None, None, 1), (2, 5, "x", 2), (3, None, "y", None)])
+    c.commit()
+    c.close()
+    t = sqlite3.connect(env / "dst.sqlite")
+    t.execute("create table t(id integer, mins integer not null default 30240, tag text not null default 'none', "
+              "strict_col integer not null)")
+    t.close()
+    con = duckdb.connect(str(env / "dst.duckdb"))
+    con.execute("create table t(id integer, mins integer not null default 30240, tag varchar not null default 'none', "
+                "strict_col integer not null)")
+    con.close()
+    s = _conn(client, auth, "sqlite", env / "src.sqlite")
+    for type_, path, table in (("sqlite", env / "dst.sqlite", "t"), ("duckdb", env / "dst.duckdb", "main.t")):
+        d = _conn(client, auth, type_, path)
+        j = run(client, auth, spec(s, "s", d, table, options={"max_rejects": -1}))
+        assert j["status"] == "succeeded" and j["rows_written"] == 2 and j["rows_rejected"] == 1, j  # strict_col has no default
+        if type_ == "sqlite":
+            rows = sqlite3.connect(path).execute("select id, mins, tag from t order by id").fetchall()
+        else:
+            rows = duckdb.connect(str(path), read_only=True).execute("select id, mins, tag from main.t order by id").fetchall()
+        assert rows == [(1, 30240, "none"), (2, 5, "x")], rows
+
+
+def test_edited_ddl_replaces_the_generated_create_table(client, auth, env):
+    s = _conn(client, auth, "sqlite", _sqlite(env, rows=50))
+    d = _conn(client, auth, "sqlite", env / "ddl.sqlite")
+    ddl = ("-- hand edited\nCREATE TABLE \"ev_custom\" (id INTEGER PRIMARY KEY, name TEXT DEFAULT 'a;b', "
+           "extra TEXT NOT NULL DEFAULT 'x');\n\nCREATE INDEX ev_custom_name ON ev_custom(name);\n")
+    body = spec(s, "ev", d, "ev_custom", columns=[{"source": "id"}, {"source": "name"}], target={"ddl": ddl})
+    plan = client.post("/api/jobs/plan", json=body, headers=auth).json()
+    assert plan["ddl"] == ["-- hand edited\nCREATE TABLE \"ev_custom\" (id INTEGER PRIMARY KEY, name TEXT DEFAULT 'a;b', "
+                           "extra TEXT NOT NULL DEFAULT 'x')", "CREATE INDEX ev_custom_name ON ev_custom(name)"], plan
+    j = run(client, auth, body)
+    assert j["status"] == "succeeded" and j["rows_written"] == 50, j
+    c = sqlite3.connect(env / "ddl.sqlite")
+    assert c.execute("select count(*), min(extra), max(extra) from ev_custom").fetchone() == (50, "x", "x")
+    assert c.execute("select name from sqlite_master where type = 'index' and name = 'ev_custom_name'").fetchone()
+    c.close()
+    detail = client.get(f"/api/jobs/{j['id']}", headers=auth).json()
+    assert detail["spec"]["target"]["ddl"] == ddl  # the request comes back for "Edit & re-run"
+
+
 def test_sqlite_time_range_on_text_timestamps(client, auth, env):
     s = _conn(client, auth, "sqlite", _sqlite(env))
     d = _conn(client, auth, "duckdb", env / "w.duckdb")

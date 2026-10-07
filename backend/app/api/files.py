@@ -53,6 +53,12 @@ def _list_dir(path: str) -> list[FileEntryOut]:
     return out
 
 
+@router.get("/roots")
+def roots() -> list[str]:
+    """The allowed top-level folders, so a folder browser knows where it cannot go further up."""
+    return [str(Path(r).resolve()) for r in get_settings().file_roots]
+
+
 @router.get("/list", response_model=list[FileEntryOut])
 async def list_dir(path: str = "") -> list[FileEntryOut]:
     """Browse a folder under an allowed root (defaults to CONDUIT_DATA_DIR). Directories sort first."""

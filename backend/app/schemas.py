@@ -195,3 +195,5 @@ class PipelinePreviewOut(BaseModel):
     rows: list[dict[str, Any]]
     sampled_rows: int
     full_chain: bool  # whether this ran every step (and so refreshed the pipeline's cached output schema)
+    error: str | None = None  # why a step failed; columns/rows are then the output of the step before it
+    error_step: str | None = None  # id of the step that failed

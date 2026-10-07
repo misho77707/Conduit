@@ -4,7 +4,8 @@ import { connectionsApi, pipelinesApi, type ConnectionOut, type PipelineOut } fr
 import { useToast } from "../lib/toast";
 import { cronLabel, relativeTime, statusBadge, untilTime } from "../lib/format";
 import { Icon } from "../ui/Icon";
-import { Button, IconButton } from "../ui/Button";
+import { Button } from "../ui/Button";
+import { RowMenu } from "../ui/RowMenu";
 import { StatusBadge } from "../ui/Badge";
 import { NewPipelineModal } from "./pipelines/NewPipelineModal";
 
@@ -21,7 +22,6 @@ export function Pipelines() {
   const [pipes, setPipes] = useState<PipelineOut[] | null>(null);
   const [conns, setConns] = useState<ConnectionOut[]>([]);
   const [addOpen, setAddOpen] = useState(false);
-  const [menuFor, setMenuFor] = useState<string | null>(null);
 
   const load = () => pipelinesApi.list().then(setPipes).catch(() => toast("err", "Could not load pipelines"));
 
@@ -31,7 +31,6 @@ export function Pipelines() {
   }, []);
 
   async function runNow(p: PipelineOut) {
-    setMenuFor(null);
     try {
       const job = await pipelinesApi.run(p.id);
       nav(`/jobs/${job.id}`);
@@ -41,14 +40,12 @@ export function Pipelines() {
   }
 
   async function remove(p: PipelineOut) {
-    setMenuFor(null);
     if (!confirm(`Delete pipeline "${p.name}"?`)) return;
     try { await pipelinesApi.remove(p.id); load(); }
     catch (e) { toast("err", "Could not delete the pipeline", e instanceof Error ? e.message : undefined); }
   }
 
   async function toggleEnabled(p: PipelineOut) {
-    setMenuFor(null);
     try { await pipelinesApi.update(p.id, { enabled: !p.enabled }); load(); }
     catch (e) { toast("err", "Could not update the schedule", e instanceof Error ? e.message : undefined); }
   }
@@ -107,22 +104,11 @@ export function Pipelines() {
                   </div>
                   <div style={{ display: "flex", gap: 4, justifyContent: "flex-end", position: "relative" }}>
                     <Button height={28} padX={10} onClick={() => nav(`/pipelines/${p.id}`)} style={{ fontSize: 12 }}>Open</Button>
-                    <IconButton icon="more_horiz" title="More" onClick={() => setMenuFor(menuFor === p.id ? null : p.id)} />
-                    {menuFor === p.id && (
-                      <div style={{ position: "absolute", right: 0, top: 32, width: 150, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, boxShadow: "var(--shadow-2)", padding: 4, zIndex: 5, display: "flex", flexDirection: "column" }}>
-                        <button onClick={() => runNow(p)} disabled={!p.output_columns} className="hover-surface2" style={{ height: 30, display: "flex", alignItems: "center", gap: 8, padding: "0 8px", border: "none", background: "transparent", borderRadius: 5, cursor: p.output_columns ? "pointer" : "default", textAlign: "left", color: p.output_columns ? "var(--text-2)" : "var(--text-3)" }}>
-                          <Icon name="play_arrow" style={{ fontSize: 16 }} />Run now
-                        </button>
-                        {p.schedule && (
-                          <button onClick={() => toggleEnabled(p)} className="hover-surface2" style={{ height: 30, display: "flex", alignItems: "center", gap: 8, padding: "0 8px", border: "none", background: "transparent", borderRadius: 5, cursor: "pointer", textAlign: "left", color: "var(--text-2)" }}>
-                            <Icon name={p.enabled ? "pause" : "play_arrow"} style={{ fontSize: 16 }} />{p.enabled ? "Pause schedule" : "Resume schedule"}
-                          </button>
-                        )}
-                        <button onClick={() => remove(p)} className="hover-surface2" style={{ height: 30, display: "flex", alignItems: "center", gap: 8, padding: "0 8px", border: "none", background: "transparent", borderRadius: 5, cursor: "pointer", textAlign: "left", color: "var(--err)" }}>
-                          <Icon name="delete" style={{ fontSize: 16 }} />Delete
-                        </button>
-                      </div>
-                    )}
+                    <RowMenu width={170} items={[
+                      { icon: "play_arrow", label: "Run now", onClick: () => runNow(p), disabled: !p.output_columns },
+                      ...(p.schedule ? [{ icon: p.enabled ? "pause" : "play_arrow", label: p.enabled ? "Pause schedule" : "Resume schedule", onClick: () => toggleEnabled(p) }] : []),
+                      { icon: "delete", label: "Delete", tone: "var(--err)", onClick: () => remove(p) },
+                    ]} />
                   </div>
                 </div>
               );

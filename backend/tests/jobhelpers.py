@@ -23,7 +23,7 @@ def _docker_socket_open(path: str = "/var/run/docker.sock") -> bool:
         s.connect(path)
         s.close()
         return True
-    except OSError:
+    except (OSError, AttributeError):  # AttributeError: no AF_UNIX on Windows
         return False
 
 

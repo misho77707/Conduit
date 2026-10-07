@@ -1,31 +1,13 @@
 import { useState, type ReactNode } from "react";
 import type { StepIn } from "../../lib/api";
 import { LOGICAL_TYPES } from "../../lib/constants";
-import { highlight } from "../../lib/highlight";
 import { Icon } from "../../ui/Icon";
 import { Input, Select, TextArea } from "../../ui/Input";
 import { Button } from "../../ui/Button";
 import { ToggleRow } from "../../ui/Toggle";
-
-function CodeEditor({ code, onChange, lang }: { code: string; onChange: (v: string) => void; lang: "sql" | "py" }) {
-  const lines = highlight(code, lang);
-  return (
-    <div style={{ position: "relative", border: "1px solid var(--border)", borderRadius: 6, background: "var(--code-bg)", minHeight: 160 }}>
-      <div style={{ padding: "10px 0", fontFamily: "'Geist Mono',monospace", fontSize: 12, lineHeight: "20px" }}>
-        {lines.map((ln) => (
-          <div key={ln.n} style={{ display: "flex", whiteSpace: "pre", minHeight: 20 }}>
-            <span style={{ width: 40, flexShrink: 0, textAlign: "right", paddingRight: 12, color: "var(--text-3)", userSelect: "none" }}>{ln.n}</span>
-            <span>{ln.segs.map((sg, i) => <span key={i} style={{ color: sg.c }}>{sg.t}</span>)}</span>
-          </div>
-        ))}
-      </div>
-      <textarea
-        value={code} onChange={(e) => onChange(e.target.value)} spellCheck={false}
-        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", minHeight: 160, padding: "10px 0 10px 40px", margin: 0, border: "none", outline: "none", resize: "none", background: "transparent", color: "transparent", caretColor: "var(--text)", fontFamily: "'Geist Mono',monospace", fontSize: 12, lineHeight: "20px", whiteSpace: "pre", overflow: "auto" }}
-      />
-    </div>
-  );
-}
+import { CodeEditor } from "./CodeEditor";
+import { PythonGuide } from "./PythonGuide";
+import { defaultConfig } from "./types";
 
 function Row({ children }: { children: ReactNode }) {
   return <div style={{ display: "flex", gap: 8, alignItems: "center" }}>{children}</div>;
@@ -134,12 +116,32 @@ export function StepEditor({ step, onChange, inputColumns }: { step: StepIn; onC
     );
   }
 
-  // python
+  return <PythonStep code={c.code || ""} onChange={(code) => onChange({ code })} columns={inputColumns} />;
+}
+
+function PythonStep({ code, onChange, columns }: { code: string; onChange: (code: string) => void; columns: string[] }) {
+  const [guide, setGuide] = useState(false);
+  const starter = (defaultConfig("python") as { code: string }).code;
+
+  function use(example: string) {
+    if (code.trim() && code.trim() !== starter.trim() && !confirm("Replace the current code with this example?")) return;
+    onChange(example);
+    setGuide(false);
+  }
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <div style={{ display: "flex", gap: 8, fontSize: 12, color: "var(--text-3)" }}><Icon name="info" style={{ fontSize: 15 }} />Define <code>def transform(df)</code>: receives and returns a pandas DataFrame. Unsandboxed.</div>
-      <CodeEditor code={c.code || ""} onChange={(v) => onChange({ code: v })} lang="py" />
-      {inputColumns.length > 0 && <div style={{ fontSize: 11, color: "var(--text-3)" }}>Input columns: {inputColumns.join(", ")}</div>}
+      <div style={{ display: "flex", gap: 8, fontSize: 12, color: "var(--text-3)", alignItems: "center" }}>
+        <Icon name="info" style={{ fontSize: 15 }} />
+        <span style={{ flex: 1 }}>Define <code>def transform(df)</code>: receives and returns a pandas DataFrame. <code>pd</code> and <code>np</code> are ready to use.</span>
+        <Button height={26} padX={8} icon="menu_book" style={{ fontSize: 12 }} onClick={() => setGuide(true)}>Guide &amp; examples</Button>
+      </div>
+      <CodeEditor code={code} onChange={onChange} lang="py" suggest columns={columns} />
+      <div style={{ fontSize: 11, color: "var(--text-3)" }}>
+        Suggestions appear after <code>df.</code>, <code>df["</code>, <code>.str.</code>, <code>.dt.</code>, <code>pd.</code>, <code>np.</code> · Ctrl+Space anywhere
+        {columns.length > 0 && <> · columns: {columns.join(", ")}</>}
+      </div>
+      {guide && <PythonGuide onClose={() => setGuide(false)} onUse={use} columns={columns} />}
     </div>
   );
 }

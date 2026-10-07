@@ -84,6 +84,26 @@ def test_preview_infers_schema_and_caches_it(client, auth, env):
     assert [c["name"] for c in r.json()["output_columns"]] == ["account_id", "amt", "currency", "amt_usd"]
 
 
+def test_preview_with_an_unfinished_step_keeps_the_last_good_table(client, auth, env):
+    src = _sqlite_conn(client, auth, _seed(env))
+    dst = _sqlite_conn(client, auth, env / "dst.sqlite")
+    steps = [
+        {"id": "s1", "kind": "rename", "config": {"mapping": {"acct": "account_id"}}},
+        {"id": "s2", "kind": "derive", "config": {"column": "", "expr": ""}},  # just added, not filled in yet
+        {"id": "s3", "kind": "filter", "config": {"expr": "amt > 0"}},
+    ]
+    pid = client.post("/api/pipelines", json=_pipeline_body(src, dst, steps=steps), headers=auth).json()["id"]
+
+    r = client.post(f"/api/pipelines/{pid}/preview", json={"sample_rows": 50}, headers=auth)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["error_step"] == "s2" and "Derive step needs" in body["error"]
+    assert [c["name"] for c in body["columns"]] == ["account_id", "amt", "currency"]  # output of s1
+    assert body["sampled_rows"] == 3 and body["full_chain"] is False
+    assert client.get(f"/api/pipelines/{pid}", headers=auth).json()["output_columns"] is None  # nothing cached
+    assert client.post(f"/api/pipelines/{pid}/run", headers=auth).status_code == 422
+
+
 def test_preview_upto_step_does_not_cache(client, auth, env):
     src = _sqlite_conn(client, auth, _seed(env))
     dst = _sqlite_conn(client, auth, env / "dst.sqlite")

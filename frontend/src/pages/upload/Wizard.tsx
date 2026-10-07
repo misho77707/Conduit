@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { connectionsApi, metaApi, type ConnectionOut, type DbTypeOut } from "../../lib/api";
+import { connectionsApi, jobsApi, metaApi, type ConnectionOut, type DbTypeOut } from "../../lib/api";
 import { useToast } from "../../lib/toast";
 import { useTheme } from "../../lib/theme";
 import { Icon } from "../../ui/Icon";
@@ -10,6 +10,7 @@ import { Step1Source } from "./Step1Source";
 import { Step2Preview } from "./Step2Preview";
 import { Step3Target } from "./Step3Target";
 import { Step4Review } from "./Step4Review";
+import { stateFromJob } from "./fromJob";
 
 export interface WizardCtx {
   conns: ConnectionOut[];
@@ -27,19 +28,35 @@ const STEPS = [
 
 export function Wizard() {
   const nav = useNavigate();
-  const loc = useLocation() as { state?: { targetConnId?: string } };
+  const loc = useLocation() as { state?: { targetConnId?: string; fromJobId?: string } };
   const toast = useToast();
   const { theme } = useTheme();
   const [conns, setConns] = useState<ConnectionOut[]>([]);
   const [dbTypes, setDbTypes] = useState<Record<string, DbTypeOut>>({});
   const [s, setS] = useState<WizardState>(() => initialWizardState(loc.state?.targetConnId || null));
   const [maxStepReached, setMaxStepReached] = useState(1);
+  const fromJobId = loc.state?.fromJobId;
+  const [hydrating, setHydrating] = useState(!!fromJobId);
 
   const reloadConns = () => connectionsApi.list().then(setConns).catch(() => {});
   useEffect(() => {
     reloadConns();
     metaApi.dbTypes().then((ts) => setDbTypes(Object.fromEntries(ts.map((t) => [t.type, t]))));
   }, []);
+
+  useEffect(() => {
+    if (!fromJobId) return;
+    setHydrating(true);
+    jobsApi.get(fromJobId)
+      .then((job) => {
+        if (!job.spec) throw new Error("This job has no saved request to edit");
+        return stateFromJob(job.spec);
+      })
+      .then((st) => { setS({ ...st, step: 4 }); setMaxStepReached(4); })
+      .catch((e) => toast("err", "Could not reopen the job", e instanceof Error ? e.message : undefined))
+      .finally(() => setHydrating(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fromJobId]);
 
   const set = (patch: Partial<WizardState>) => setS((prev) => ({ ...prev, ...patch }));
   const ctx: WizardCtx = { conns, dbTypes, dark: theme === "dark", reloadConns };
@@ -70,9 +87,17 @@ export function Wizard() {
       <div style={{ display: "flex", alignItems: "flex-end", gap: 12, flexWrap: "wrap" }}>
         <div style={{ flex: 1, minWidth: 240 }}>
           <h1 style={{ margin: 0, fontSize: 20, fontWeight: 600, letterSpacing: "-0.01em" }}>Upload &amp; Load</h1>
-          <p style={{ margin: "4px 0 0", color: "var(--text-2)" }}>Bring a file or table in, check its shape, and load it into any saved connection.</p>
+          <p style={{ margin: "4px 0 0", color: "var(--text-2)" }}>
+            {fromJobId ? "Reopened from an earlier job: change anything, then run it again." : "Bring a file or table in, check its shape, and load it into any saved connection."}
+          </p>
         </div>
       </div>
+
+      {hydrating ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: 24, color: "var(--text-3)" }}>
+          <Icon name="progress_activity" spin style={{ fontSize: 18 }} />Loading the job's settings…
+        </div>
+      ) : (<>
 
       <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, display: "flex", alignItems: "center", gap: 14, padding: "14px 18px", overflowX: "auto" }}>
         {STEPS.map((st, i) => {
@@ -119,6 +144,7 @@ export function Wizard() {
           </Button>
         </div>
       )}
+      </>)}
     </div>
   );
 }

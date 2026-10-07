@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, CSSProperties } from "react";
+import type { ButtonHTMLAttributes, CSSProperties, MouseEvent } from "react";
 import { Icon } from "./Icon";
 
 type Variant = "primary" | "outline" | "ghost" | "danger" | "danger-solid";
@@ -43,7 +43,7 @@ export function Button({ variant = "outline", icon, height = 32, padX = 12, styl
 
 export function IconButton({
   icon, title, onClick, size = 28, active, style,
-}: { icon: string; title?: string; onClick?: () => void; size?: number; active?: boolean; style?: CSSProperties }) {
+}: { icon: string; title?: string; onClick?: (e: MouseEvent<HTMLButtonElement>) => void; size?: number; active?: boolean; style?: CSSProperties }) {
   return (
     <button
       title={title}

@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime as dt
 import decimal
 import math
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -16,8 +17,12 @@ from typing import Any
 import pyarrow as pa
 
 from ..ddl import TargetOptions, qi, qualified
+from ..arrowconv import coerce
 from ..model import Batch, ReadRequest, SplitSpec
-from ..types import ColSpec, clean
+from ..transform import NO_FILL
+from ..types import ColSpec, clean, to_arrow
+
+_PER_ROW_DEFAULT = re.compile(r"nextval|identity|auto_?increment|rowid|uuid|random", re.I)
 
 
 class PartialWrite(Exception):
@@ -259,6 +264,26 @@ class Adapter(ABC):
 
     @abstractmethod
     def open_writer(self, table: str, cols: list[ColSpec], mode: str, keys: list[str]) -> Writer: ...
+
+    def default_fill(self, col: ColSpec) -> Any:
+        """What replaces a NULL headed for a NOT NULL target column that has a DEFAULT (see transform.OutCol.fill).
+
+        Default: evaluate the DEFAULT expression once on the target and use that value. Sequence/identity
+        defaults are not evaluated (one value for every row would collide), so those NULLs stay rejects.
+        """
+        if col.nullable or not col.default or _PER_ROW_DEFAULT.search(col.default):
+            return NO_FILL
+        try:
+            v = self._eval_default(col.default)
+            t = to_arrow(col.logical)
+            v = coerce(v, t)
+            pa.array([v], type=t)  # validates the value fits the column type
+        except Exception:  # noqa: BLE001 - an expression we cannot evaluate just keeps the NOT NULL reject
+            return NO_FILL
+        return NO_FILL if v is None else v
+
+    def _eval_default(self, expr: str) -> Any:
+        return self._rows(f"SELECT {expr}")[0][0]  # type: ignore[attr-defined]
 
     # ---- helpers ---------------------------------------------------------------
     def is_unique(self, table: str, column: str) -> bool:

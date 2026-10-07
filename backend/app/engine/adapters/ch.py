@@ -95,9 +95,13 @@ class ClickHouseAdapter(Adapter):
     # ---- schema ------------------------------------------------------------------
     def table_columns(self, table: str) -> list[ColSpec]:
         schema, name = split_name(table)
-        rows = self._q("SELECT name, type FROM system.columns WHERE database = %s AND table = %s ORDER BY position",
-                       [schema or self._db(), name])
-        return [ColSpec(n, normalize("clickhouse", t), t.startswith("Nullable") or "Nullable(" in t) for n, t in rows]
+        rows = self._q("SELECT name, type, if(default_kind = 'DEFAULT', default_expression, '') FROM system.columns "
+                       "WHERE database = %s AND table = %s ORDER BY position", [schema or self._db(), name])
+        return [ColSpec(n, normalize("clickhouse", t), t.startswith("Nullable") or "Nullable(" in t, default=d or None)
+                for n, t, d in rows]
+
+    def _eval_default(self, expr: str) -> Any:
+        return self._q(f"SELECT {expr}")[0][0]
 
     def query_columns(self, sql: str) -> list[ColSpec]:
         client = self.c._client()
@@ -210,7 +214,9 @@ class ClickHouseAdapter(Adapter):
         schema, _ = split_name(table)
         existing = self.table_columns(table)
         stmts: list[str] = []
-        if not existing and create:
+        if not existing and create and opts.ddl:
+            stmts += opts.ddl
+        elif not existing and create:
             if schema:
                 stmts.append(f"CREATE DATABASE IF NOT EXISTS {qi('clickhouse', schema)}")
             stmts.append(create_table_sql("clickhouse", table, cols, keys, mode, opts))

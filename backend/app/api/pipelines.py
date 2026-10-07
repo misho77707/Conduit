@@ -206,14 +206,19 @@ def _preview(session: Session, p: Pipeline, sample_rows: int, upto_step: str | N
         if upto_step not in ids:
             raise HTTPException(422, f"No step with id {upto_step!r}")
         steps = steps[: ids.index(upto_step) + 1]
-    try:
-        table = apply_steps(steps, table)
-    except StepError as e:
-        raise HTTPException(422, str(e)) from e
+    # A broken (often just half-filled) step does not fail the preview: the result stops at the output of the
+    # last step that worked and names the step that did not, so the builder can keep showing the table.
+    error = error_step = None
+    for st in steps:
+        try:
+            table = apply_steps([st], table)
+        except StepError as e:
+            error, error_step = str(e), st.id
+            break
     cols = infer_colspecs(table)
-    full_chain = upto_step is None
+    full_chain = upto_step is None and error is None  # only a complete, clean run may refresh the cached schema
     return {"columns": [c.to_dict() for c in cols], "rows": _rows_json(table, sample_rows),
-            "sampled_rows": table.num_rows, "full_chain": full_chain}
+            "sampled_rows": table.num_rows, "full_chain": full_chain, "error": error, "error_step": error_step}
 
 
 @router.post("/{pipeline_id}/preview", dependencies=[Depends(current_user)])

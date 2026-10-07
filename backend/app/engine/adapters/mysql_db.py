@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 from collections.abc import Iterator
 from typing import Any
 
@@ -27,6 +28,25 @@ def to_bind(v: Any) -> Any:
     if isinstance(v, dt.datetime) and v.tzinfo is not None:
         return v.astimezone(_UTC).replace(tzinfo=None)
     return v
+
+
+_SQL_DEFAULT = re.compile(r"^('.*'|-?[\d.]+|\w+\(.*\)|current_timestamp|current_date|null)$", re.I | re.S)
+
+
+def _default_expr(d: str | None, extra: str | None) -> str | None:
+    """information_schema.columns.column_default as a SELECT-able expression.
+
+    MySQL 8 reports constant defaults as bare text (abc, 30240) and flags expressions DEFAULT_GENERATED;
+    MariaDB reports SQL ('abc', 30240, current_timestamp()) and the string NULL for "no default".
+    """
+    extra = (extra or "").lower()
+    if "auto_increment" in extra:
+        return "auto_increment"
+    if d is None or d.upper() == "NULL":
+        return None
+    if "default_generated" in extra or _SQL_DEFAULT.match(d):
+        return d
+    return "'" + d.replace("\\", "\\\\").replace("'", "''") + "'"
 
 
 def _logical_from_field(col: tuple, binary: bool) -> str:
@@ -79,9 +99,10 @@ class MySQLAdapter(Adapter):
     def table_columns(self, table: str) -> list[ColSpec]:
         schema, name = self._schema(table)
         rows = self._rows(
-            "select column_name, column_type, is_nullable from information_schema.columns "
+            "select column_name, column_type, is_nullable, column_default, extra from information_schema.columns "
             "where table_schema = COALESCE(%s, DATABASE()) and table_name = %s order by ordinal_position", [schema, name])
-        return [ColSpec(n, normalize("mysql", t), nullable == "YES") for n, t, nullable in rows]
+        return [ColSpec(n, normalize("mysql", t), nullable == "YES", default=_default_expr(d, extra))
+                for n, t, nullable, d, extra in rows]
 
     def query_columns(self, sql: str) -> list[ColSpec]:
         conn = self.c._connect(init_command=_INIT)
@@ -153,7 +174,9 @@ class MySQLAdapter(Adapter):
         schema, _ = self._schema(table)
         existing = self.table_columns(table)
         stmts: list[str] = []
-        if not existing and create:
+        if not existing and create and opts.ddl:
+            stmts += opts.ddl
+        elif not existing and create:
             if schema:
                 stmts.append(f"CREATE DATABASE IF NOT EXISTS {qi('mysql', schema)} DEFAULT CHARSET=utf8mb4")
             stmts.append(create_table_sql("mysql", table, cols, keys, mode, opts))

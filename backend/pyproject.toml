@@ -21,6 +21,7 @@ dependencies = [
   "openpyxl>=3.1",
   "pyarrow>=15",
   "pandas>=2.2",
+  "pytz>=2024.1",  # DuckDB needs it to hand TIMESTAMPTZ values to Python; pandas 3 no longer pulls it in
   "croniter>=2.0",
   "python-multipart>=0.0.9",
   "psutil>=5.9",

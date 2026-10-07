@@ -24,6 +24,11 @@ class OutCol:
     source: str  # column name in the source batch
     target: ColSpec  # name / logical type / nullability in the target
     fmt: str | None = None  # strptime format when a text column becomes DATE / TIMESTAMP
+    # Value that replaces NULLs in a NOT NULL target column (its evaluated DEFAULT); NO_FILL keeps them rejects.
+    fill: Any = None
+
+
+NO_FILL = None
 
 
 Reject = tuple[str, dict[str, Any]]
@@ -96,6 +101,8 @@ class Transformer:
                 for i, flag in enumerate(over.to_pylist()):
                     if flag:
                         bad.setdefault(i, f"column {o.target.name}: value longer than {m.group(1)} characters")
+            if not o.target.nullable and arr.null_count and o.fill is not NO_FILL:
+                arr = pc.fill_null(arr, pa.scalar(o.fill, type=arr.type))
             if not o.target.nullable and arr.null_count:
                 for i, flag in enumerate(arr.is_null().to_pylist()):
                     if flag:

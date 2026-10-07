@@ -8,4 +8,5 @@ node_modules/
 dist/
 celerybeat-schedule*
 frontend/design/
+CLAUDE.md
 

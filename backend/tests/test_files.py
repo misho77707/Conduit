@@ -31,6 +31,25 @@ def test_inspect_parquet(env):
     assert r.format == "parquet" and r.exact and r.row_estimate == 10
 
 
+def test_inspect_parquet_with_timezone_aware_timestamps(env):
+    import duckdb  # TIMESTAMPTZ values go through pytz on their way to Python
+
+    p = env / "tz.parquet"
+    duckdb.sql(f"COPY (SELECT 1 AS id, TIMESTAMPTZ '2024-05-01 10:00:00+04' AS at) TO '{p}' (FORMAT parquet)")
+    r = inspect_file(str(p))
+    assert r.format == "parquet" and r.row_estimate == 1 and r.preview[0]["id"] == 1
+
+
+def test_folder_browser_roots_and_parent(client, auth, env):
+    root = client.get("/api/files/roots", headers=auth).json()
+    assert root == [str(env.resolve())]
+    (env / "uploads").mkdir()
+    sub = client.get("/api/files/list", params={"path": str(env / "uploads")}, headers=auth)
+    assert sub.status_code == 200
+    assert client.get("/api/files/list", params={"path": root[0]}, headers=auth).status_code == 200
+    assert client.get("/api/files/list", params={"path": str(env.parent)}, headers=auth).status_code == 422
+
+
 def test_inspect_excel(env):
     from openpyxl import Workbook
     p = env / "a.xlsx"

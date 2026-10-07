@@ -50,7 +50,7 @@ class SQLiteAdapter(Adapter):
     def table_columns(self, table: str) -> list[ColSpec]:
         _, name = split_name(table)
         rows = self._rows(f"PRAGMA table_info({qi('sqlite', name)})")
-        return [ColSpec(r[1], normalize("sqlite", r[2] or ""), not (r[3] or r[5])) for r in rows]
+        return [ColSpec(r[1], normalize("sqlite", r[2] or ""), not (r[3] or r[5]), default=r[4]) for r in rows]
 
     def query_columns(self, sql: str) -> list[ColSpec]:
         conn = self.c._connect()
@@ -114,7 +114,9 @@ class SQLiteAdapter(Adapter):
                        create: bool, execute: bool) -> list[str]:
         existing = self.table_columns(table)
         stmts: list[str] = []
-        if not existing and create:
+        if not existing and create and opts.ddl:
+            stmts += opts.ddl
+        elif not existing and create:
             stmts.append(create_table_sql("sqlite", table, cols, keys, mode, opts))
         elif not existing:
             raise ValueError(f"Target table {table} does not exist")

@@ -31,6 +31,7 @@ class ColSpec:
     logical: str
     nullable: bool = True
     source_name: str | None = None  # original name when the column was renamed
+    default: str | None = None  # DEFAULT expression of an existing target column, as the database reports it
 
     def to_dict(self) -> dict:
         return {"name": self.name, "type": self.logical, "nullable": self.nullable, "source_name": self.source_name or self.name}

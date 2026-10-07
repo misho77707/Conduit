@@ -62,6 +62,7 @@ export interface WizardState {
   mode: Mode;
   keys: string[];
   rejectToFile: boolean;
+  ddlText: string | null; // hand-edited CREATE statements for a new table; null = use the generated DDL
 
   // plan
   plan: JobPlan | null;
@@ -84,7 +85,7 @@ export function initialWizardState(targetConnId: string | null): WizardState {
     afterWatermark: false, lastNDays: false, days: "30", where: "",
     workers: 4, chunkMode: "rec", chunk: 50000,
     targetConnId, tableMode: "new", targetTable: "", targetTables: null, targetTableSchema: null,
-    mode: "append", keys: [], rejectToFile: true,
+    mode: "append", keys: [], rejectToFile: true, ddlText: null,
     plan: null, planLoading: false, planError: null,
   };
 }

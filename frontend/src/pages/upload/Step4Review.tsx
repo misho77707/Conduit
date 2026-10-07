@@ -32,7 +32,7 @@ export function Step4Review({ s, set, ctx, onCreated }: Props) {
   const summary = [
     { k: "Source", v: sourceLabel, s: s.filePath ? (s.fileInspect ? `${s.fileInspect.format.toUpperCase()} · ${s.fileInspect.columns.length} columns` : "") : sourceConn?.name || "" },
     { k: "Schema", v: `${included.length} of ${s.columns.length || included.length} columns`, s: plan ? `${plan.target_columns.length} target columns` : "" },
-    { k: "Target", v: targetConn?.name || "", s: s.targetTable + (plan?.target_exists ? " · existing" : " · will be created") },
+    { k: "Target", v: targetConn?.name || "", s: s.targetTable + (plan?.target_exists ? " · existing" : s.tableMode === "new" && s.ddlText ? " · created with your edited DDL" : " · will be created") },
     { k: "Load mode", v: s.mode[0].toUpperCase() + s.mode.slice(1), s: s.mode === "upsert" ? `key: ${s.keys.join(", ") || "—"}` : `chunk ${s.chunk.toLocaleString()} rows` },
     { k: "Bad rows", v: s.rejectToFile ? "Reject to file" : "Stop the job", s: s.rejectToFile ? "written to a reject CSV" : "fails on first invalid row" },
     { k: "Rows", v: plan?.rows_total != null ? `${plan.rows_total_exact ? "" : "~"}${plan.rows_total.toLocaleString()}` : "unknown", s: plan?.split_column ? `split on ${plan.split_column} · ${plan.workers} workers` : "single stream" },

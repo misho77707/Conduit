@@ -111,9 +111,10 @@ def _run_sql(sql: str, table: pa.Table) -> pa.Table:
 
 
 def _run_python(code: str, table: pa.Table) -> pa.Table:
+    import numpy as np
     import pandas as pd
 
-    ns: dict[str, Any] = {}
+    ns: dict[str, Any] = {"pd": pd, "np": np}  # pre-imported, as the builder's guide promises
     try:
         exec(compile(code, "<pipeline step>", "exec"), ns)  # noqa: S102 - the user's own step, run against their own data
     except SyntaxError as e:

@@ -35,12 +35,12 @@ from ..services import build_connector
 from . import joblog
 from .adapters import PartialWrite, get_adapter
 from .arrowconv import _jsonable
-from .ddl import TargetOptions, suggest_partition
+from .ddl import TargetOptions, split_statements, suggest_partition
 from .filesource import FileAdapter, FileSpec
 from .model import ReadRequest, SplitSpec, dec, enc
 from .spec import ColumnMap, JobIn, parse_bound
 from .steps import Step, apply_steps, compile_steps
-from .transform import OutCol, Reject, Transformer
+from .transform import NO_FILL, OutCol, Reject, Transformer
 from .types import ColSpec, clean
 
 log = logging.getLogger("conduit.engine")
@@ -300,6 +300,7 @@ def prepare(spec: JobIn, session: Session) -> Prepared:
         base = suggest.get(m.source, by_name[m.source])
         logical = clean(m.type) if m.type else base.logical
         nullable = m.nullable if m.nullable is not None else base.nullable
+        default = None
         if existing:
             if name not in existing:
                 raise JobError(f"Column {name!r} does not exist in target table {t.table} "
@@ -307,10 +308,14 @@ def prepare(spec: JobIn, session: Session) -> Prepared:
             ex = existing[name]
             if m.type and clean(m.type) != clean(ex.logical):
                 notes.append(f"{name}: using the existing target type {ex.logical} instead of {clean(m.type)}")
-            logical, nullable = ex.logical, ex.nullable
+            logical, nullable, default = ex.logical, ex.nullable, ex.default
         if name in t.keys:
             nullable = False
-        out.append(OutCol(m.source, ColSpec(name, logical, nullable, m.source if m.source != name else None), m.format))
+        col = ColSpec(name, logical, nullable, m.source if m.source != name else None, default=default)
+        fill = tgt.default_fill(col)
+        if fill is not NO_FILL:
+            notes.append(f"{name}: empty values get the column default {fill!r} ({default})")
+        out.append(OutCol(m.source, col, m.format, fill))
     if not out:
         raise JobError("No columns selected")
     missing = [k for k in t.keys if k not in seen]
@@ -362,7 +367,7 @@ def prepare(spec: JobIn, session: Session) -> Prepared:
     unique = bool(split_col and s.table and split_col in by_name and src.is_unique(s.table, split_col))
     tgt_cols = [oc.target for oc in out]
     try:  # dry validation: e.g. upsert needs a unique key / ReplacingMergeTree on an existing table
-        tgt.prepare_target(t.table, tgt_cols, t.mode, t.keys, TargetOptions(order_by=t.order_by, partition_by=t.partition_by), t.create, False)
+        tgt.prepare_target(t.table, tgt_cols, t.mode, t.keys, TargetOptions(order_by=t.order_by, partition_by=t.partition_by, ddl=custom_ddl(t)), t.create, False)
     except ValueError as e:
         raise JobError(str(e)) from e
     return Prepared(spec, src, tgt, req, out, Transformer(read_cols_sel, out), tgt_cols, bool(existing), unique,
@@ -407,7 +412,11 @@ def target_options(prep: Prepared, total: int | None) -> TargetOptions:
         part = suggest_partition(prep.target_cols, total)
         if part:
             prep.notes.append(f"Target will be partitioned by {part} because the table is large")
-    return TargetOptions(order_by=t.order_by, partition_by=part, est_rows=total)
+    return TargetOptions(order_by=t.order_by, partition_by=part, est_rows=total, ddl=custom_ddl(t))
+
+
+def custom_ddl(t) -> list[str] | None:
+    return split_statements(t.ddl) or None if t.ddl and t.create else None
 
 
 @dataclass

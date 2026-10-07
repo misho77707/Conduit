@@ -53,6 +53,7 @@ export function buildTarget(s: WizardState): TargetIn {
   return {
     connection_id: s.targetConnId!, table: s.targetTable, mode: s.mode,
     keys: s.mode === "upsert" ? s.keys : [], create: s.tableMode === "new", order_by: [], partition_by: null,
+    ddl: s.tableMode === "new" && s.ddlText?.trim() ? s.ddlText : null,
   };
 }
 
