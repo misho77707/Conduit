@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..db import get_engine, get_sessionmaker
 from ..models import Connection, Job, JobSplit, Watermark, utcnow
+from ..connectors import category_of
 from ..services import build_connector
 from . import joblog
 from .adapters import PartialWrite, get_adapter
@@ -236,6 +237,8 @@ def _conn(session: Session, cid: uuid.UUID | None, role: str) -> Connection:
     conn = session.get(Connection, cid) if cid else None
     if conn is None:
         raise JobError(f"The {role} connection no longer exists")
+    if category_of(conn.type) != "database":
+        raise JobError(f"{conn.name} is a file storage connection ({conn.type}): it cannot be a {role} table")
     return conn
 
 

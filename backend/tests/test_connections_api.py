@@ -23,7 +23,7 @@ def _duck_file(dir_, name="wh.duckdb"):
 
 def test_db_types_metadata(client, auth):
     types = {t["type"]: t for t in client.get("/api/meta/db-types", headers=auth).json()}
-    assert set(types) == {"postgres", "clickhouse", "mysql", "sqlite", "duckdb", "mongodb"}
+    assert set(types) == {"postgres", "clickhouse", "mysql", "sqlite", "duckdb", "mongodb", "s3", "sftp", "http"}
     assert types["mongodb"]["kind"] == "uri" and types["sqlite"]["kind"] == "file"
     assert types["postgres"]["default_port"] == 5432
 

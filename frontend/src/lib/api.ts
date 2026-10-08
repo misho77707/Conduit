@@ -77,13 +77,15 @@ export const auth = {
 
 // ---- meta / connections -------------------------------------------------------------
 
+export type ConnectionCategory = "database" | "storage";
 export interface DbTypeOut {
-  type: string; label: string; abbr: string; kind: "host" | "uri" | "file";
+  type: string; label: string; abbr: string; kind: "host" | "uri" | "file" | "s3" | "sftp" | "http";
   default_port: number | null; description: string; secret_fields: string[];
+  category: ConnectionCategory; // storage = S3 / SFTP / HTTP: files, never tables
 }
 
 export interface ConnectionOut {
-  id: string; name: string; type: string; env: string | null; host: string; database: string | null;
+  id: string; name: string; type: string; env: string | null; host: string; category: ConnectionCategory; database: string | null;
   config: Record<string, unknown>; status: "ok" | "warn" | "err" | "idle"; latency_ms: number | null;
   server_version: string | null; note: string | null; last_checked_at: string | null; created_at: string;
 }
@@ -91,8 +93,12 @@ export interface ConnectionOut {
 export interface TestResultOut {
   ok: boolean; status: "ok" | "warn" | "err"; latency_ms: number | null; version: string | null;
   detail: string | null; error: string | null; degraded: boolean;
+  learned?: Record<string, unknown>; // config a test discovered (an SFTP host key): saved with the connection
 }
 export interface ConnectionTestOut extends TestResultOut { connection: ConnectionOut | null; }
+
+/** Connections that hold tables (everything except file storage), for every database picker. */
+export const databasesOnly = (conns: ConnectionOut[]) => conns.filter((c) => c.category !== "storage");
 
 export interface TableOut { name: string; est_rows: number | null; size_bytes: number | null; exact: boolean; info: string; }
 

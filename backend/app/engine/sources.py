@@ -9,6 +9,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from ..connectors import category_of
 from ..models import Connection
 from ..services import build_connector
 from .adapters import get_adapter
@@ -26,6 +27,8 @@ def source_connection(session: Session, s: SourceIn, role: str = "source") -> Co
     conn = session.get(Connection, s.connection_id) if s.connection_id else None
     if conn is None:
         raise JobError(f"The {role} connection no longer exists")
+    if category_of(conn.type) != "database":
+        raise JobError(f"{conn.name} is a file storage connection ({conn.type}): it has files, not tables")
     return conn
 
 

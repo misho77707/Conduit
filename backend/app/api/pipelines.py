@@ -18,7 +18,8 @@ from ..engine.sources import SourceUnavailable, raw_columns, source_adapter
 from ..engine.spec import JobIn, OptionsIn, SourceIn, StepIn, StepOutCol, TargetIn
 from ..engine.steps import StepError, apply_steps, compile_steps, infer_colspecs
 from ..engine.types import to_arrow
-from ..models import Job, Pipeline, User, utcnow
+from ..connectors import category_of
+from ..models import Connection, Job, Pipeline, User, utcnow
 from ..schemas import PipelineIn, PipelineLastRunOut, PipelineOut, PipelinePatch, PipelinePreviewIn, PipelinePreviewOut
 from .jobs import _dispatch
 
@@ -72,6 +73,7 @@ def list_pipelines(session: Session = Depends(get_session)) -> list[PipelineOut]
 @router.post("", status_code=status.HTTP_201_CREATED, dependencies=[Depends(current_user)])
 def create_pipeline(body: PipelineIn, session: Session = Depends(get_session)) -> PipelineOut:
     _validate_shape(body.source, body.target, body.options, body.steps)
+    _check_connections(session, body.source, body.target)
     _check_schedule(body.schedule)
     p = Pipeline(name=body.name, description=body.description, source=body.source, target=body.target,
                 options=body.options, steps=body.steps, schedule=body.schedule, enabled=body.enabled,
@@ -99,6 +101,7 @@ def update_pipeline(pipeline_id: uuid.UUID, body: PipelinePatch, session: Sessio
     schema_affecting = {"source", "target", "options", "steps"} & data.keys()
     _validate_shape(data.get("source", p.source), data.get("target", p.target), data.get("options", p.options),
                     data.get("steps", p.steps))
+    _check_connections(session, data.get("source", p.source), data.get("target", p.target))
     if "schedule" in data:
         _check_schedule(data["schedule"])
     for k, v in data.items():
@@ -139,6 +142,18 @@ def _validate_shape(source: dict, target: dict, options: dict, steps: list) -> N
         compile_steps(step_models)
     except StepError as e:
         raise HTTPException(422, str(e)) from e
+
+
+def _check_connections(session: Session, source: dict, target: dict) -> None:
+    """A table source and the target must be databases, not file storage (S3 / SFTP / HTTP)."""
+    for role, side in (("source", source), ("target", target)):
+        cid = side.get("connection_id")
+        if role == "source" and (side.get("file") or side.get("remote")):
+            continue
+        conn = session.get(Connection, uuid.UUID(str(cid))) if cid else None
+        if conn is not None and category_of(conn.type) != "database":
+            raise HTTPException(422, f"{conn.name} is a file storage connection ({conn.type}): it cannot be the {role} "
+                                     f"{'table' if role == 'source' else 'of a load'}")
 
 
 # ---- preview ---------------------------------------------------------------------

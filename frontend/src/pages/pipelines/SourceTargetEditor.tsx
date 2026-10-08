@@ -1,5 +1,5 @@
 import { useEffect, useId, useState } from "react";
-import { connectionsApi, type ConnectionOut, type SourceIn, type TargetIn } from "../../lib/api";
+import { connectionsApi, databasesOnly, type ConnectionOut, type SourceIn, type TargetIn } from "../../lib/api";
 import { Field } from "../../ui/Field";
 import { Input, Select, TextArea } from "../../ui/Input";
 import { SegmentedControl } from "../../ui/SegmentedControl";
@@ -22,7 +22,7 @@ export function SourceEditor({ value, onChange, conns }: { value: SourceIn; onCh
 
   function setKind(k: "database" | "file") {
     if (k === "file") onChange({ file: { path: "", header: true, encoding: "utf-8", skip_rows: 0, null_values: [""] }, where: "" });
-    else onChange({ connection_id: conns[0]?.id || null, table: "", where: "" });
+    else onChange({ connection_id: databasesOnly(conns)[0]?.id || null, table: "", where: "" });
   }
 
   return (
@@ -37,7 +37,7 @@ export function SourceEditor({ value, onChange, conns }: { value: SourceIn; onCh
           <Field label="Connection">
             <Select value={value.connection_id || ""} onChange={(e) => onChange({ connection_id: e.target.value, table: "", query: null, where: value.where })}>
               <option value="">Choose…</option>
-              {conns.filter((c) => c.type !== "mongodb" || view === "table").map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              {databasesOnly(conns).filter((c) => c.type !== "mongodb" || view === "table").map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
             </Select>
           </Field>
           <SegmentedControl small options={[{ id: "table", label: "Table" }, { id: "query", label: "SQL query" }].filter((o) => o.id === "table" || conn?.type !== "mongodb")} value={view} onChange={(v) => onChange(v === "query" ? { connection_id: value.connection_id, query: "", where: "" } : { connection_id: value.connection_id, table: "", where: "" })} />
@@ -73,7 +73,7 @@ export function TargetEditor({ value, onChange, conns }: { value: TargetIn; onCh
       <Field label="Connection">
         <Select value={value.connection_id || ""} onChange={(e) => onChange({ ...value, connection_id: e.target.value })}>
           <option value="">Choose…</option>
-          {conns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          {databasesOnly(conns).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
         </Select>
       </Field>
       <Field label={mongo ? "Collection" : "Table"} hint={mongo ? undefined : "Include a schema, e.g. public.orders_clean"}>

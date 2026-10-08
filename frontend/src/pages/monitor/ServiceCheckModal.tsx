@@ -17,7 +17,7 @@ const DEFAULTS: Record<CheckKind, { target: string; expect: string; targetLabel:
 
 export function ServiceCheckModal({ conns, onClose, onSaved }: { conns: ConnectionOut[]; onClose: () => void; onSaved: () => void }) {
   const toast = useToast();
-  const sqlConns = conns.filter((c) => c.type !== "mongodb");
+  const sqlConns = conns.filter((c) => c.type !== "mongodb" && c.category !== "storage");
   const [name, setName] = useState("");
   const [kind, setKind] = useState<CheckKind>("http");
   const [target, setTarget] = useState(DEFAULTS.http.target);

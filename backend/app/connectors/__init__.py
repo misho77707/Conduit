@@ -1,16 +1,21 @@
 from typing import Any
 
-from .base import ColumnInfo, Connector, SplitCandidate, TableInfo, TableSchema, TestResult
+from .base import ColumnInfo, Connector, NotADatabase, SplitCandidate, TableInfo, TableSchema, TestResult
 from .ch import ClickHouseConnector
 from .duckdb_db import DuckDBConnector
+from .http import HTTPConnector
 from .mongo import MongoConnector
 from .mysql_db import MySQLConnector
 from .pg import PostgresConnector
+from .s3 import S3Connector
+from .sftp import SFTPConnector
 from .sqlite_db import SQLiteConnector
+from .storage import StorageConnector
 
 REGISTRY: dict[str, type[Connector]] = {
     c.type: c
-    for c in (PostgresConnector, ClickHouseConnector, MySQLConnector, SQLiteConnector, DuckDBConnector, MongoConnector)
+    for c in (PostgresConnector, ClickHouseConnector, MySQLConnector, SQLiteConnector, DuckDBConnector, MongoConnector,
+              S3Connector, SFTPConnector, HTTPConnector)
 }
 
 
@@ -26,11 +31,17 @@ def get_connector(type_: str, config: dict[str, Any], secrets: dict[str, Any], t
     return cls(config, secrets, timeout=timeout)
 
 
+def category_of(type_: str) -> str:
+    """"database" or "storage" (S3 / SFTP / HTTP); unknown types count as databases."""
+    cls = REGISTRY.get(type_)
+    return cls.category if cls else "database"
+
+
 def db_types() -> list[dict[str, Any]]:
     return [c.describe() for c in REGISTRY.values()]
 
 
 __all__ = [
-    "Connector", "TableInfo", "TableSchema", "ColumnInfo", "SplitCandidate", "TestResult",
-    "REGISTRY", "get_connector", "db_types", "UnknownConnectorType",
+    "Connector", "StorageConnector", "TableInfo", "TableSchema", "ColumnInfo", "SplitCandidate", "TestResult",
+    "NotADatabase", "REGISTRY", "get_connector", "category_of", "db_types", "UnknownConnectorType",
 ]

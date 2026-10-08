@@ -20,6 +20,7 @@ from ..engine.runner import snapshot as job_snapshot
 from ..models import Connection, Job, ServiceCheck, User, utcnow
 from ..monitor import checks as chk
 from ..monitor import host
+from ..connectors import category_of
 from ..services import all_connections, serialize, test_many
 
 router = APIRouter(prefix="/monitor", tags=["monitor"], dependencies=[Depends(current_user)])
@@ -129,6 +130,8 @@ def _validated_connection(session: Session, connection_id: uuid.UUID | None) -> 
     conn = session.get(Connection, connection_id) if connection_id else None
     if conn is None:
         raise HTTPException(422, "Connection not found")
+    if category_of(conn.type) != "database":
+        raise HTTPException(422, f"Query checks need a SQL database ({conn.name} is a file storage connection)")
     if conn.type in _NO_SQL:
         raise HTTPException(422, f"Query checks need a SQL database ({conn.type} is not supported)")
 

@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import get_settings
-from .connectors import Connector, get_connector
+from .connectors import Connector, category_of, get_connector
 from .connectors.base import TestResult
 from .models import Connection, utcnow
 from .schemas import ConnectionOut
@@ -20,7 +20,7 @@ def build_connector(conn: Connection) -> Connector:
 
 def serialize(conn: Connection) -> ConnectionOut:
     return ConnectionOut(
-        id=conn.id, name=conn.name, type=conn.type, env=conn.env, host=conn.display_host,
+        id=conn.id, name=conn.name, type=conn.type, env=conn.env, host=conn.display_host, category=category_of(conn.type),
         database=(conn.config or {}).get("database"), config=conn.config or {},
         status=conn.status, latency_ms=conn.latency_ms, server_version=conn.server_version,
         note=conn.note, last_checked_at=conn.last_checked_at, created_at=conn.created_at,
@@ -39,6 +39,8 @@ def apply_result(conn: Connection, result: TestResult) -> None:
     if result.ok:
         conn.server_version = result.version or conn.server_version
         conn.note = "Slow handshake" if result.degraded else None
+        if result.learned:  # e.g. an SFTP host key seen for the first time (trust on first use)
+            conn.config = {**(conn.config or {}), **result.learned}
     else:
         conn.note = (result.error or "Check failed")[:500]
 

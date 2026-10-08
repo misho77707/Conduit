@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { connectionsApi, filesApi, type FileEntry } from "../../lib/api";
+import { connectionsApi, databasesOnly, filesApi, type FileEntry } from "../../lib/api";
 import { useToast } from "../../lib/toast";
 import { fmtBytes, dbTile, statusBadge } from "../../lib/format";
 import { SUPPORTED_FILE_FORMATS } from "../../lib/constants";
@@ -248,7 +248,7 @@ function DatabaseTab({ s, set, ctx }: Props) {
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         <span style={{ fontSize: 12, fontWeight: 500, color: "var(--text-2)" }}>Source connection</span>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(210px,1fr))", gap: 8 }}>
-          {ctx.conns.map((c) => {
+          {databasesOnly(ctx.conns).map((c) => {
             const tile = dbTile(c.type, ctx.dark);
             const active = s.sourceConnId === c.id;
             return (

@@ -51,6 +51,14 @@ export function AddConnectionModal({ connection, initialTypes, onClose, onSaved 
       });
     } else if (t.kind === "uri") {
       setForm({ name: connection.name, uri: "", database: String(c.database ?? ""), auth_source: String(c.auth_source ?? ""), tls: !!c.tls });
+    } else if (t.kind === "s3") {
+      setForm({ name: connection.name, bucket: String(c.bucket ?? ""), region: String(c.region ?? ""), prefix: String(c.prefix ?? ""),
+        endpoint_url: String(c.endpoint_url ?? ""), path_style: !!c.path_style });
+    } else if (t.kind === "sftp") {
+      setForm({ name: connection.name, host: String(c.host ?? ""), port: c.port != null ? String(c.port) : "22", user: String(c.user ?? ""),
+        base_path: String(c.base_path ?? ""), host_key_sha256: String(c.host_key_sha256 ?? "") });
+    } else if (t.kind === "http") {
+      setForm({ name: connection.name, base_url: String(c.base_url ?? "") });
     } else {
       setForm({ name: connection.name, path: String(c.path ?? ""), read_only: !!c.read_only, create_if_missing: !!c.create_if_missing });
     }
@@ -59,12 +67,15 @@ export function AddConnectionModal({ connection, initialTypes, onClose, onSaved 
   const pick = (t: DbTypeOut) => {
     setType(t);
     setTest({ state: "idle" });
-    setForm({ name: "", port: t.default_port ? String(t.default_port) : "", ssl: "disable", database: "", user: "", read_only: false, create_if_missing: false, tls: false });
+    setForm({ name: "", port: t.default_port ? String(t.default_port) : "", ssl: "disable", database: "", user: "", read_only: false, create_if_missing: false, tls: false,
+      region: t.kind === "s3" ? "us-east-1" : "", path_style: false });
   };
 
   const set = (patch: Partial<Form>) => { setForm((f) => ({ ...f, ...patch })); setTest({ state: "idle" }); };
 
   const { config, secrets } = useMemo(() => buildPayload(type, form), [type, form]);
+  // what a successful test discovered (an SFTP host key: trusted on first use) is saved with the connection
+  const learned = test.state === "ok" ? test.result?.learned || {} : {};
 
   async function runTest() {
     if (!type) return;
@@ -83,11 +94,11 @@ export function AddConnectionModal({ connection, initialTypes, onClose, onSaved 
     try {
       if (isEdit && connection) {
         const name = String(form.name || "").trim() || connection.name;
-        const conn = await connectionsApi.update(connection.id, { name, config, secrets });
+        const conn = await connectionsApi.update(connection.id, { name, config: { ...config, ...learned }, secrets });
         toast("ok", `Updated ${conn.name}`, test.state === "ok" ? "Connection verified." : "Not re-tested — run a test from the list.");
       } else {
         const name = String(form.name || "").trim() || type.type;
-        const conn = await connectionsApi.create({ name, type: type.type, config, secrets });
+        const conn = await connectionsApi.create({ name, type: type.type, config: { ...config, ...learned }, secrets });
         toast("ok", `Saved ${conn.name}`, test.state === "ok" ? "Connection verified and added to background checks." : "Saved without testing. Run a test from the list.");
       }
       onSaved();
@@ -103,7 +114,7 @@ export function AddConnectionModal({ connection, initialTypes, onClose, onSaved 
   return (
     <Modal
       title={isEdit ? "Edit connection" : "Add connection"}
-      sub={isEdit ? `Update the settings for ${connection?.name}.` : step === 2 ? "Step 2 of 2 · Connection details" : "Step 1 of 2 · Choose a database type"}
+      sub={isEdit ? `Update the settings for ${connection?.name}.` : step === 2 ? "Step 2 of 2 · Connection details" : "Step 1 of 2 · Choose a database or file storage"}
       onClose={onClose}
       footer={
         <>
@@ -119,9 +130,11 @@ export function AddConnectionModal({ connection, initialTypes, onClose, onSaved 
         </>
       }
     >
-      {step === 1 && (
+      {step === 1 && ([["database", "Databases"], ["storage", "File storage"]] as const).map(([cat, heading]) => (
+        <div key={cat} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ fontSize: 11, fontWeight: 500, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.04em" }}>{heading}</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(190px,1fr))", gap: 10 }}>
-          {types.map((t) => {
+          {types.filter((t) => (t.category || "database") === cat).map((t) => {
             const tile = dbTile(t.type, dark);
             const active = type?.type === t.type;
             return (
@@ -140,7 +153,8 @@ export function AddConnectionModal({ connection, initialTypes, onClose, onSaved 
             );
           })}
         </div>
-      )}
+        </div>
+      ))}
 
       {step === 2 && type && (
         <>
@@ -205,6 +219,82 @@ export function AddConnectionModal({ connection, initialTypes, onClose, onSaved 
             </>
           )}
 
+          {type.kind === "s3" && (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0,2fr) minmax(0,1fr)", gap: 12 }}>
+                <Field label="Bucket"><Input value={String(form.bucket || "")} onChange={(e) => set({ bucket: e.target.value })} placeholder="my-data-lake" /></Field>
+                <Field label="Region"><Input value={String(form.region || "")} onChange={(e) => set({ region: e.target.value })} placeholder="us-east-1" /></Field>
+              </div>
+              <Field label="Prefix · optional" hint="A folder inside the bucket that every path is relative to, e.g. exports/daily">
+                <Input value={String(form.prefix || "")} onChange={(e) => set({ prefix: e.target.value })} />
+              </Field>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 12 }}>
+                <Field label="Access key ID" hint={isEdit ? "Blank keeps the current key" : "Leave both keys empty to use the server's IAM role"}>
+                  <Input value={String(form.access_key_id || "")} onChange={(e) => set({ access_key_id: e.target.value })} placeholder={isEdit ? "unchanged" : "AKIA…"} />
+                </Field>
+                <Field label="Secret access key" hint={isEdit ? "Blank keeps the current secret" : undefined}>
+                  <Input type="password" mono={false} value={String(form.secret_access_key || "")} onChange={(e) => set({ secret_access_key: e.target.value })} placeholder={isEdit ? "••••••••" : undefined} />
+                </Field>
+              </div>
+              <Field label="Session token · optional" hint="Only for temporary (STS) credentials">
+                <Input type="password" mono={false} value={String(form.session_token || "")} onChange={(e) => set({ session_token: e.target.value })} placeholder={isEdit ? "unchanged" : undefined} />
+              </Field>
+              <Field label="Endpoint URL · optional" hint="For S3-compatible storage: MinIO (http://minio:9000), Cloudflare R2, Wasabi … Empty = AWS.">
+                <Input value={String(form.endpoint_url || "")} onChange={(e) => set({ endpoint_url: e.target.value })} placeholder="https://s3.example.com" />
+              </Field>
+              <ToggleRow on={!!form.path_style} onClick={() => set({ path_style: !form.path_style })} title="Path-style addressing" sub="endpoint/bucket/key instead of bucket.endpoint/key. MinIO usually needs this." />
+            </>
+          )}
+
+          {type.kind === "sftp" && (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0,3fr) minmax(0,1fr)", gap: 12 }}>
+                <Field label="Host"><Input value={String(form.host || "")} onChange={(e) => set({ host: e.target.value })} placeholder="sftp.partner.com" /></Field>
+                <Field label="Port"><Input value={String(form.port || "")} onChange={(e) => set({ port: e.target.value })} /></Field>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 12 }}>
+                <Field label="User"><Input value={String(form.user || "")} onChange={(e) => set({ user: e.target.value })} /></Field>
+                <Field label="Base path · optional" hint="/abs/path, or relative to the user's home">
+                  <Input value={String(form.base_path || "")} onChange={(e) => set({ base_path: e.target.value })} placeholder="/upload" />
+                </Field>
+              </div>
+              <Field label="Password" hint={isEdit ? "Blank keeps the current password" : "A password, a private key, or both"}>
+                <Input type="password" mono={false} value={String(form.password || "")} onChange={(e) => set({ password: e.target.value })} placeholder={isEdit ? "••••••••" : undefined} />
+              </Field>
+              <Field label="Private key · optional" hint={isEdit ? "Blank keeps the current key. PEM or OpenSSH format (Ed25519, ECDSA, RSA)." : "Paste the whole key: PEM or OpenSSH format (Ed25519, ECDSA, RSA)."}>
+                <TextArea rows={4} value={String(form.private_key || "")} onChange={(e) => set({ private_key: e.target.value })} placeholder={isEdit ? "unchanged" : "-----BEGIN OPENSSH PRIVATE KEY-----"} style={{ fontFamily: "'Geist Mono',monospace", fontSize: 11 }} />
+              </Field>
+              <Field label="Key passphrase · optional">
+                <Input type="password" mono={false} value={String(form.passphrase || "")} onChange={(e) => set({ passphrase: e.target.value })} placeholder={isEdit ? "unchanged" : undefined} />
+              </Field>
+              <div style={{ display: "flex", gap: 10, alignItems: "center", padding: "10px 12px", borderRadius: 8, background: "var(--surface-2)", fontSize: 12 }}>
+                <Icon name="fingerprint" style={{ color: "var(--text-3)" }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  {form.host_key_sha256 ? (
+                    <><div style={{ fontWeight: 500 }}>Trusted host key</div><div style={{ fontFamily: "'Geist Mono',monospace", fontSize: 11, color: "var(--text-2)", overflowWrap: "anywhere" }}>{String(form.host_key_sha256)}</div></>
+                  ) : learned.host_key_sha256 ? (
+                    <><div style={{ fontWeight: 500 }}>Host key seen for the first time: it will be trusted when you save</div><div style={{ fontFamily: "'Geist Mono',monospace", fontSize: 11, color: "var(--text-2)", overflowWrap: "anywhere" }}>{String(learned.host_key_sha256)}</div></>
+                  ) : (
+                    <span style={{ color: "var(--text-2)" }}>No host key stored yet. The first successful connection trusts the server&rsquo;s key; a later change is refused.</span>
+                  )}
+                </div>
+                {form.host_key_sha256 && <Button height={26} padX={8} style={{ fontSize: 12 }} onClick={() => set({ host_key_sha256: "" })}>Forget</Button>}
+              </div>
+            </>
+          )}
+
+          {type.kind === "http" && (
+            <>
+              <Field label="Base URL" hint="Files are addressed relative to this URL. The secret headers are only ever sent to this host.">
+                <Input value={String(form.base_url || "")} onChange={(e) => set({ base_url: e.target.value })} placeholder="https://files.example.com/exports/" />
+              </Field>
+              <Field label="Headers" hint={isEdit ? "Blank keeps the current headers. One Name: value per line." : "One Name: value per line, e.g. Authorization: Bearer … Stored encrypted."}>
+                <TextArea rows={3} value={String(form.headers || "")} onChange={(e) => set({ headers: e.target.value })} placeholder={isEdit ? "unchanged" : "Authorization: Bearer eyJ…"} style={{ fontFamily: "'Geist Mono',monospace", fontSize: 11 }} />
+              </Field>
+              <div style={{ fontSize: 12, color: "var(--text-3)" }}>Public files need no connection: paste their URL straight into Upload &amp; Load.</div>
+            </>
+          )}
+
           {test.state === "testing" && (
             <StatusBox tone="accent" icon="progress_activity" spin title="Connecting…" />
           )}
@@ -252,6 +342,24 @@ function buildPayload(type: DbTypeOut | null, form: Form): { config: Record<stri
     put("database", form.database || "");
     if (form.auth_source) put("auth_source", form.auth_source);
     config.tls = !!form.tls;
+  } else if (type.kind === "s3") {
+    put("bucket", String(form.bucket || "").trim());
+    put("region", String(form.region || "").trim() || "us-east-1");
+    put("prefix", String(form.prefix || "").trim());
+    put("endpoint_url", String(form.endpoint_url || "").trim());
+    config.path_style = !!form.path_style;
+    for (const k of ["access_key_id", "secret_access_key", "session_token"]) if (form[k]) put(k, String(form[k]).trim());
+  } else if (type.kind === "sftp") {
+    put("host", String(form.host || "").trim());
+    if (form.port) put("port", Number(form.port));
+    put("user", String(form.user || "").trim());
+    put("base_path", String(form.base_path || "").trim());
+    // "" after Forget clears the stored fingerprint; the next connection trusts the server's key again
+    if (form.host_key_sha256 !== undefined) config.host_key_sha256 = form.host_key_sha256 || null;
+    for (const k of ["password", "private_key", "passphrase"]) if (form[k]) put(k, form[k]);
+  } else if (type.kind === "http") {
+    put("base_url", String(form.base_url || "").trim());
+    if (form.headers) put("headers", form.headers);
   } else if (type.kind === "file") {
     put("path", form.path || "");
     config.read_only = !!form.read_only;

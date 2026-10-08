@@ -103,7 +103,7 @@ export function statusBadge(status: string, label?: string): Badge {
 // ---- per-database-type color tile (matches C.tile()/DB[type].h in the prototype) --------
 
 const DB_HUE: Record<string, number> = {
-  postgres: 255, clickhouse: 85, mysql: 220, sqlite: 195, duckdb: 105, mongodb: 150,
+  postgres: 255, clickhouse: 85, mysql: 220, sqlite: 195, duckdb: 105, mongodb: 150, s3: 40, sftp: 300, http: 340,
 };
 
 export function dbTile(type: string, dark: boolean): { tbg: string; tfg: string } {

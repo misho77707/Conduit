@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { connectionsApi, jobsApi, type TableOut } from "../../lib/api";
+import { connectionsApi, databasesOnly, jobsApi, type TableOut } from "../../lib/api";
 import { dbTile, statusBadge } from "../../lib/format";
 import { highlight } from "../../lib/highlight";
 import { Icon } from "../../ui/Icon";
@@ -51,7 +51,7 @@ export function Step3Target({ s, set, ctx }: Props) {
       <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
         <Card>
           <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--border)", fontWeight: 600 }}>Target connection</div>
-          {ctx.conns.map((c) => {
+          {databasesOnly(ctx.conns).map((c) => {
             const tile = dbTile(c.type, ctx.dark);
             const on = c.id === s.targetConnId;
             return (

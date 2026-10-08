@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..connectors import REGISTRY, UnknownConnectorType, db_types, get_connector
+from ..connectors import REGISTRY, UnknownConnectorType, category_of, db_types, get_connector
 from ..db import get_session
 from ..deps import current_user
 from ..models import Connection, User
@@ -35,6 +35,11 @@ def _get_or_404(session: Session, conn_id: uuid.UUID) -> Connection:
     if conn is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Connection not found")
     return conn
+
+
+def _database_or_422(conn: Connection) -> None:
+    if category_of(conn.type) != "database":
+        raise HTTPException(422, f"{conn.name} is a file storage connection ({conn.type}): it has files, not tables")
 
 
 def _validate(type_: str, config: dict, secrets: dict) -> None:
@@ -133,6 +138,7 @@ async def test_saved(conn_id: uuid.UUID, session: Session = Depends(get_session)
 @router.get("/{conn_id}/tables", response_model=list[TableOut])
 async def list_tables(conn_id: uuid.UUID, session: Session = Depends(get_session)) -> list[TableOut]:
     conn = _get_or_404(session, conn_id)
+    _database_or_422(conn)
     try:
         connector = build_connector(conn)
         tables = await run_in_threadpool(connector.list_tables)
@@ -146,6 +152,7 @@ async def list_tables(conn_id: uuid.UUID, session: Session = Depends(get_session
 @router.get("/{conn_id}/tables/{table}/inspect", response_model=TableSchemaOut)
 async def inspect_table(conn_id: uuid.UUID, table: str, session: Session = Depends(get_session)) -> TableSchemaOut:
     conn = _get_or_404(session, conn_id)
+    _database_or_422(conn)
     try:
         connector = build_connector(conn)
         schema = await run_in_threadpool(connector.inspect, table)

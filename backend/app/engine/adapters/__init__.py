@@ -1,7 +1,7 @@
 """One adapter per database type; `get_adapter(connector)` picks the right one."""
 from __future__ import annotations
 
-from ...connectors.base import Connector
+from ...connectors.base import Connector, NotADatabase
 from .base import Adapter, PartialWrite, SqlDialect, Writer
 
 
@@ -18,6 +18,8 @@ def _registry() -> dict[str, type[Adapter]]:
 
 
 def get_adapter(connector: Connector) -> Adapter:
+    if connector.category != "database":
+        raise NotADatabase(f"{connector.label} connections hold files, not tables")
     try:
         return _registry()[connector.type](connector)
     except KeyError:

@@ -137,7 +137,7 @@ export function Connections() {
                           {c.name}
                           {c.env && <span style={{ fontFamily: "'Geist Mono',monospace", fontSize: 10, padding: "0 5px", borderRadius: 4, border: "1px solid var(--border-2)", color: "var(--text-3)" }}>{c.env}</span>}
                         </div>
-                        <div style={{ fontFamily: "'Geist Mono',monospace", fontSize: 11, color: "var(--text-3)" }}>db: {c.database || "—"}</div>
+                        <div style={{ fontFamily: "'Geist Mono',monospace", fontSize: 11, color: "var(--text-3)" }}>{c.category === "storage" ? "file storage" : `db: ${c.database || "—"}`}</div>
                       </div>
                     </div>
                     <span style={{ color: "var(--text-2)" }}>{typeLabel}</span>
@@ -152,7 +152,7 @@ export function Connections() {
                       <Button height={28} padX={10} icon="bolt" disabled={testing.has(c.id)} onClick={() => test(c.id)} style={{ fontSize: 12 }}>
                         {testing.has(c.id) ? "Testing…" : "Test"}
                       </Button>
-                      <IconButton icon="upload" title="Load data into this connection" onClick={() => nav("/upload", { state: { targetConnId: c.id } })} />
+                      {c.category !== "storage" && <IconButton icon="upload" title="Load data into this connection" onClick={() => nav("/upload", { state: { targetConnId: c.id } })} />}
                       <RowMenu width={140} items={[
                         { icon: "edit", label: "Edit", tone: "var(--text)", onClick: () => setEditing(c) },
                         { icon: "delete", label: "Delete", tone: "var(--err)", onClick: () => remove(c.id, c.name) },

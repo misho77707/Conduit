@@ -51,6 +51,7 @@ class ConnectionOut(BaseModel):
     type: str
     env: str | None
     host: str  # display_host
+    category: str = "database"  # database | storage (S3 / SFTP / HTTP: a source of files, never a table)
     database: str | None
     config: dict[str, Any]
     status: str
@@ -69,6 +70,7 @@ class TestResultOut(BaseModel):
     detail: str | None = None
     error: str | None = None
     degraded: bool = False
+    learned: dict[str, Any] = Field(default_factory=dict)  # config a test discovered (SFTP host key): save it with the connection
 
 
 class ConnectionTestOut(TestResultOut):

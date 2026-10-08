@@ -25,6 +25,7 @@ class TestResult:
     detail: str | None = None
     error: str | None = None
     degraded: bool = False
+    learned: dict[str, Any] = field(default_factory=dict)  # config to store, see Connector.learned
 
     @property
     def status(self) -> str:
@@ -118,11 +119,20 @@ def parse_extra(extra: str | dict | None) -> dict[str, str]:
     return out
 
 
+class UserFacingError(Exception):
+    """An error whose message is already written for the user (shown as-is, without the exception class name)."""
+
+
+class NotADatabase(UserFacingError, ValueError):
+    """A file-storage connection was used where a database is needed."""
+
+
 class Connector(ABC):
     type: ClassVar[str]
     label: ClassVar[str]
     abbr: ClassVar[str]
-    kind: ClassVar[str]  # host | uri | file  (drives the add-connection form)
+    kind: ClassVar[str]  # host | uri | file | s3 | sftp | http  (drives the add-connection form)
+    category: ClassVar[str] = "database"  # database | storage (S3 / SFTP / HTTP: files, not tables)
     default_port: ClassVar[int | None] = None
     description: ClassVar[str] = ""
     secret_fields: ClassVar[tuple[str, ...]] = ("password",)
@@ -131,6 +141,9 @@ class Connector(ABC):
         self.config = config
         self.secrets = secrets
         self.timeout = timeout
+        # Config values a connection discovered and the caller should store (an SFTP host key: trust on first
+        # use). Merged into the saved connection's config; returned to the add dialog for unsaved tests.
+        self.learned: dict[str, Any] = {}
 
     # ---- validation / display ----------------------------------------------------
 
@@ -155,12 +168,13 @@ class Connector(ABC):
         try:
             version, detail = self._test()
         except Exception as e:  # driver errors are diverse; report them, never raise
-            msg = redact(f"{type(e).__name__}: {e}".strip(), self.secrets)
+            text = str(e) if isinstance(e, UserFacingError) else f"{type(e).__name__}: {e}"
+            msg = redact(text.strip(), self.secrets)
             return TestResult(ok=False, error=msg[:400])
         latency = (time.perf_counter() - start) * 1000
         return TestResult(
             ok=True, latency_ms=round(latency, 1), version=version, detail=detail,
-            degraded=latency > SLOW_MS,
+            degraded=latency > SLOW_MS, learned=dict(self.learned),
         )
 
     @abstractmethod
@@ -180,5 +194,5 @@ class Connector(ABC):
         return {
             "type": cls.type, "label": cls.label, "abbr": cls.abbr, "kind": cls.kind,
             "default_port": cls.default_port, "description": cls.description,
-            "secret_fields": list(cls.secret_fields),
+            "secret_fields": list(cls.secret_fields), "category": cls.category,
         }
