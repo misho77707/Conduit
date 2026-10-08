@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { pipelinesApi, type PipelineOut } from "../../lib/api";
-import { untilTime } from "../../lib/format";
+import { relativeTime, untilTime } from "../../lib/format";
 import { Modal } from "../../ui/Modal";
 import { Field } from "../../ui/Field";
 import { Input } from "../../ui/Input";
@@ -19,6 +19,9 @@ export function ScheduleModal({ pipeline, onClose, onSaved }: { pipeline: Pipeli
   const [cron, setCron] = useState(pipeline.schedule || "");
   const [enabled, setEnabled] = useState(pipeline.enabled);
   const [hasPreview, setHasPreview] = useState(!!pipeline.output_columns);
+  // a remote newest / all source that skips loaded files: the scheduler checks first and only loads what is new
+  const r = pipeline.source.remote;
+  const remoteSkip = r && r.match !== "exact" && r.skip_loaded && !(r.match === "all" && pipeline.target.mode === "replace") ? r.match : null;
   const [err, setErr] = useState("");
   const [saving, setSaving] = useState(false);
   const [previewing, setPreviewing] = useState(false);
@@ -91,6 +94,22 @@ export function ScheduleModal({ pipeline, onClose, onSaved }: { pipeline: Pipeli
         <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12, color: "var(--text-2)" }}>
           <Icon name="schedule" style={{ fontSize: 15, color: "var(--text-3)" }} />
           Currently next runs {untilTime(pipeline.next_run_at)}
+        </div>
+      )}
+      {remoteSkip && (
+        <div style={{ display: "flex", gap: 8, padding: "10px 12px", borderRadius: 6, background: "var(--accent-soft)", fontSize: 12, alignItems: "flex-start" }}>
+          <Icon name="cloud_sync" style={{ fontSize: 15, color: "var(--accent)", marginTop: 1 }} />
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span>
+              Each slot first checks {remoteSkip === "newest" ? "for a newer file" : "for new files"} matching <code>{pipeline.source.remote?.path}</code>.
+              A load only starts when there is something new; a check with nothing new creates no job (it is only noted here and in the list).
+            </span>
+            {pipeline.last_checked_at && (
+              <span style={{ color: pipeline.last_check_note?.startsWith("check failed") ? "var(--err)" : "var(--text-2)" }}>
+                Last check {relativeTime(pipeline.last_checked_at)}: {pipeline.last_check_note}
+              </span>
+            )}
+          </div>
         </div>
       )}
       {!hasPreview && (

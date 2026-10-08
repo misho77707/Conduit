@@ -8,12 +8,26 @@ import { Button } from "../ui/Button";
 import { RowMenu } from "../ui/RowMenu";
 import { StatusBadge } from "../ui/Badge";
 import { NewPipelineModal } from "./pipelines/NewPipelineModal";
+import { remoteLabel } from "./remote/RemotePicker";
 
 function sourceLabel(p: PipelineOut, conns: ConnectionOut[]): { icon: string; text: string } {
+  if (p.source.remote) {
+    const r = p.source.remote;
+    return { icon: "cloud", text: `${remoteLabel(r, conns).split("/").pop() || r.path}${r.match === "exact" ? "" : ` · ${r.match}`}` };
+  }
   if (p.source.file) return { icon: "description", text: p.source.file.path.split("/").pop() || p.source.file.path || "file" };
   const conn = conns.find((c) => c.id === p.source.connection_id);
   const what = p.source.table || (p.source.query ? "query" : "?");
   return { icon: "database", text: `${conn?.name || "?"} · ${what}` };
+}
+
+/** "checked 5m ago · no new files": the scheduler's last look, when it is newer than the last run. */
+export function lastCheck(p: PipelineOut): string | null {
+  if (!p.last_checked_at || !p.last_check_note) return null;
+  const ran = p.last_run?.started_at ? new Date(p.last_run.started_at).getTime() : 0;
+  if (new Date(p.last_checked_at).getTime() < ran - 60_000 && p.last_check_note.startsWith("load started")) return null;
+  const note = /^No new files/i.test(p.last_check_note) ? "no new files" : p.last_check_note.startsWith("load started") ? "new file(s) found" : p.last_check_note;
+  return `checked ${relativeTime(p.last_checked_at)} · ${note}`;
 }
 
 export function Pipelines() {
@@ -99,6 +113,11 @@ export function Pipelines() {
                     {p.schedule && (
                       <span style={{ fontSize: 11, color: "var(--text-3)" }}>
                         {p.enabled ? (p.output_columns ? untilTime(p.next_run_at) : "no preview yet") : "paused"}
+                      </span>
+                    )}
+                    {lastCheck(p) && (
+                      <span title={p.last_check_note || ""} style={{ fontSize: 11, color: p.last_check_note?.startsWith("check failed") ? "var(--err)" : "var(--text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {lastCheck(p)}
                       </span>
                     )}
                   </div>

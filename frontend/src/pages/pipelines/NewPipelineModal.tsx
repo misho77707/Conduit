@@ -15,7 +15,7 @@ export function NewPipelineModal({ conns, onClose, onCreated }: { conns: Connect
   const [err, setErr] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const canSave = name.trim() && target.connection_id && target.table.trim() && (source.file ? source.file.path.trim() : source.connection_id && (source.table?.trim() || source.query?.trim()));
+  const canSave = name.trim() && target.connection_id && target.table.trim() && (source.remote ? source.remote.path.trim() : source.file ? source.file.path.trim() : source.connection_id && (source.table?.trim() || source.query?.trim()));
 
   async function save() {
     setSaving(true);

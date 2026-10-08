@@ -12,6 +12,7 @@ import { Input } from "../../ui/Input";
 import { STEP_META, newStep, stepSummary } from "./types";
 import { SourceEditor, TargetEditor } from "./SourceTargetEditor";
 import { StepEditor } from "./StepEditor";
+import { remoteLabel } from "../remote/RemotePicker";
 import { ScheduleModal } from "./ScheduleModal";
 
 interface Draft {
@@ -198,7 +199,7 @@ export function Builder() {
         {/* Steps sidebar */}
         <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: 12, display: "flex", flexDirection: "column" }}>
           <div style={{ fontSize: 11, fontWeight: 500, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.04em", padding: "0 4px 10px" }}>Steps</div>
-          <SidebarItem icon="input" title="Read source" sub={draft.source.file ? draft.source.file.path || "no path yet" : draft.source.table || draft.source.query || "no source yet"} mode="Source"
+          <SidebarItem icon="input" title="Read source" sub={draft.source.remote ? remoteLabel(draft.source.remote, conns) || "no file yet" : draft.source.file ? draft.source.file.path || "no path yet" : draft.source.table || draft.source.query || "no source yet"} mode="Source"
             active={selected === "source"} onClick={() => setSelected("source")} />
           {draft.steps.map((s) => (
             <SidebarItem key={s.id} icon={STEP_META[s.kind].icon} title={STEP_META[s.kind].label} sub={stepSummary(s)} mode={STEP_META[s.kind].group === "code" ? s.kind.toUpperCase() : "Visual"}

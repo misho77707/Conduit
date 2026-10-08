@@ -17,7 +17,7 @@ export const DEFAULT_OPTIONS: CompareOptions = {
 };
 
 const emptySide = (): SourceIn => ({ connection_id: null, table: "", where: "" });
-const ready = (s: SourceIn) => (s.file ? !!s.file.path?.trim() : !!s.connection_id && !!(s.table?.trim() || s.query?.trim()));
+const ready = (s: SourceIn) => (s.remote ? !!s.remote.path.trim() : s.file ? !!s.file.path?.trim() : !!s.connection_id && !!(s.table?.trim() || s.query?.trim()));
 
 interface Row { source: string; sourceType: string; target: string; include: boolean }
 interface Preset { pairs: ComparePair[] | null; keys: string[] | null }
