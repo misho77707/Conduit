@@ -103,3 +103,12 @@ def test_upload_a_gz_file(client, auth, env):
     assert r.status_code == 201, r.text
     b = _inspect(client, auth, r.json()["path"]).json()
     assert (b["format"], b["compression"], b["row_estimate"]) == ("csv", "gzip", 3)
+
+
+def test_inspect_honours_header_and_skip_rows(client, auth, env):
+    p = env / "raw.csv"
+    p.write_text("exported by tool\nid,name\n1,a\n2,b\n")
+    b = client.post("/api/files/inspect", json={"path": str(p), "skip_rows": 1}, headers=auth).json()
+    assert [c["name"] for c in b["columns"]] == ["id", "name"] and b["preview"][0]["name"] == "a", b
+    b = client.post("/api/files/inspect", json={"path": str(p), "skip_rows": 1, "header": False}, headers=auth).json()
+    assert len(b["columns"]) == 2 and b["preview"][0][b["columns"][1]["name"]] == "name", b

@@ -1,9 +1,12 @@
 import { AUTO_TYPE } from "../../lib/constants";
 import type { ColumnMapIn, JobIn, OptionsIn, SourceIn, TargetIn } from "../../lib/api";
-import type { WizardState } from "./types";
+import { sourceMode, type WizardState } from "./types";
 
 export function buildSource(s: WizardState): SourceIn {
-  if (s.filePath) {
+  if (sourceMode(s) === "remote" && s.remote) {
+    return { where: "", remote: { ...s.remote.spec, header: s.fileHeader, skip_rows: s.fileSkipRows } };
+  }
+  if (sourceMode(s) === "file" && s.filePath) {
     return {
       where: "",
       file: { path: s.filePath, header: s.fileHeader, skip_rows: s.fileSkipRows, encoding: "utf-8", null_values: [""] },
@@ -16,7 +19,7 @@ export function buildSource(s: WizardState): SourceIn {
 }
 
 export function buildOptions(s: WizardState): OptionsIn {
-  const isFile = !!s.filePath;
+  const isFile = sourceMode(s) !== "database";
   let strategy = s.strategy;
   let split_column: string | null = null;
   let lo: string | null = null;

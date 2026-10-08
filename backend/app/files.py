@@ -146,19 +146,29 @@ def materialize(path: Path, unpack_dir: Path | None = None) -> Path:
     return dest
 
 
-def _duckdb_source(path: Path, fmt: str) -> str:
+def _duckdb_source(path: Path, fmt: str, opts: dict[str, Any] | None = None) -> str:
+    """`opts`: the user's CSV overrides (header, skip_rows, delimiter); anything not given is auto-detected."""
     p = str(path).replace("'", "''")
     if fmt == "csv":
-        return f"read_csv_auto('{p}')"
+        o = opts or {}
+        args = [f"'{p}'"]
+        if o.get("header") is not None:
+            args.append(f"header={'true' if o['header'] else 'false'}")
+        if o.get("skip_rows"):
+            args.append(f"skip={int(o['skip_rows'])}")
+        if o.get("delimiter"):
+            args.append("delim='" + str(o["delimiter"]).replace("'", "''") + "'")
+        return f"read_csv_auto({', '.join(args)})"
     if fmt == "json":
         return f"read_json_auto('{p}')"
     return f"read_parquet('{p}')"
 
 
-def _inspect_tabular(path: Path, fmt: str, size: int, sample_rows: int, gz: bool = False) -> FileInspection:
+def _inspect_tabular(path: Path, fmt: str, size: int, sample_rows: int, gz: bool = False,
+                     opts: dict[str, Any] | None = None) -> FileInspection:
     con = duckdb.connect()
     try:
-        src = _duckdb_source(path, fmt)
+        src = _duckdb_source(path, fmt, opts)
         rel = con.sql(f"select * from {src}")
         columns = [ColumnInfo(name=n, type=str(t)) for n, t in zip(rel.columns, rel.types)]
         preview = [dict(zip(rel.columns, r)) for r in con.sql(f"select * from {src} limit {sample_rows}").fetchall()]
@@ -205,14 +215,15 @@ def _inspect_excel(path: Path, size: int, sample_rows: int) -> FileInspection:
         wb.close()
 
 
-def inspect_file(path_str: str, sample_rows: int = 20) -> FileInspection:
+def inspect_file(path_str: str, sample_rows: int = 20, opts: dict[str, Any] | None = None) -> FileInspection:
     path = resolve_allowed(path_str)
     if not path.exists() or not path.is_file():
         raise FileNotFoundError(f"{path} does not exist")
-    return inspect_local(path, sample_rows)
+    return inspect_local(path, sample_rows, opts=opts)
 
 
-def inspect_local(path: Path, sample_rows: int = 20, fmt: str | None = None) -> FileInspection:
+def inspect_local(path: Path, sample_rows: int = 20, fmt: str | None = None,
+                  opts: dict[str, Any] | None = None) -> FileInspection:
     """Inspect a file already known to be safe to read (an allowed path, or a cached / downloaded copy)."""
     _, comp = split_compression(path.name)
     fmt = fmt or detect_format(path)
@@ -221,7 +232,7 @@ def inspect_local(path: Path, sample_rows: int = 20, fmt: str | None = None) -> 
     if fmt == "excel":
         res = _inspect_excel(data, size, sample_rows)
     else:
-        res = _inspect_tabular(data, fmt, size, sample_rows, gz=comp == "gzip")
+        res = _inspect_tabular(data, fmt, size, sample_rows, gz=comp == "gzip", opts=opts)
     res.path, res.compression = str(path), comp
     if comp == "zip":
         res.notes.insert(0, f"Read from {data.name} inside the zip archive.")

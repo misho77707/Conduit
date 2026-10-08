@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { connectionsApi, databasesOnly, filesApi, type FileEntry } from "../../lib/api";
+import { connectionsApi, databasesOnly, filesApi, remoteApi, type FileEntry, type RemoteIn } from "../../lib/api";
+import { MatchLine, RemotePicker } from "../remote/RemotePicker";
 import { useToast } from "../../lib/toast";
 import { fmtBytes, dbTile, fileFormatLabel, statusBadge } from "../../lib/format";
 import { SUPPORTED_FILE_FORMATS } from "../../lib/constants";
@@ -25,7 +26,7 @@ export function Step1Source({ s, set, ctx }: Props) {
   async function inspectPicked(path: string, name: string) {
     try {
       const insp = await filesApi.inspect(path, 20);
-      set({ filePath: path, uploadedName: name, fileInspect: insp, columns: defaultColumnsFromNative(insp.columns) });
+      set({ filePath: path, uploadedName: name, fileInspect: insp, columns: defaultColumnsFromNative(insp.columns), remote: null });
     } catch (e) {
       toast("err", "Could not read file", e instanceof Error ? e.message : undefined);
     }
@@ -50,7 +51,7 @@ export function Step1Source({ s, set, ctx }: Props) {
       <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16 }}>
         {s.sourceTab === "upload" && <UploadTab s={s} set={set} onInspected={inspectPicked} />}
         {s.sourceTab === "server" && <ServerTab s={s} onPick={inspectPicked} />}
-        {s.sourceTab === "remote" && <RemoteTab />}
+        {s.sourceTab === "remote" && <RemoteTab s={s} set={set} ctx={ctx} />}
         {s.sourceTab === "database" && <DatabaseTab s={s} set={set} ctx={ctx} />}
       </div>
     </div>
@@ -200,17 +201,66 @@ function ServerTab({ s, onPick }: { s: WizardState; onPick: (path: string, name:
 
 // ---- Remote (not built) ----------------------------------------------------------------
 
-function RemoteTab() {
+function RemoteTab({ s, set, ctx }: Props) {
+  const [draft, setDraft] = useState<RemoteIn | null>(s.remote?.spec || null);
+  const [needsFormat, setNeedsFormat] = useState(!!s.remote?.spec.format);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const insp = s.remote ? s.fileInspect : null;
+  const ready = !!draft && !!draft.path.trim() && (!needsFormat || !!draft.format);
+
+  function change(v: RemoteIn) {
+    setDraft(v);
+    setError(null);
+    if (s.remote) set({ remote: null, fileInspect: null, columns: [] });  // the inspected file no longer matches
+  }
+
+  async function inspect() {
+    if (!draft) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await remoteApi.inspect({ ...draft, header: s.fileHeader, skip_rows: s.fileSkipRows }, 20);
+      set({
+        remote: { spec: draft, display: res.remote.file.display, sampled: res.remote.file.sampled, match: res.remote.match },
+        fileInspect: res, columns: defaultColumnsFromNative(res.columns),
+        filePath: null, uploadedName: null, uploadState: "idle", uploadPct: 0,  // a remote file replaces a local one
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Could not read the file";
+      if (/choose the file format/i.test(msg)) setNeedsFormat(true);
+      setError(msg);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12, alignItems: "flex-start" }}>
-      <div style={{ display: "inline-flex", padding: 2, borderRadius: 7, background: "var(--surface-3)", opacity: 0.5 }}>
-        {["Amazon S3", "SFTP", "HTTP URL"].map((l) => <span key={l} style={{ height: 28, padding: "0 12px", display: "flex", alignItems: "center", borderRadius: 5, fontWeight: 500, fontSize: 13 }}>{l}</span>)}
+    <>
+      <RemotePicker value={draft} onChange={change} conns={ctx.conns} onConnsChanged={ctx.reloadConns} needsFormat={needsFormat} />
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <Button variant={insp ? "outline" : "primary"} icon={busy ? "progress_activity" : "travel_explore"} disabled={!ready || busy} onClick={inspect}>
+          {busy ? "Reading…" : insp ? "Inspect again" : draft?.match === "all" ? "Inspect the first file" : "Inspect file"}
+        </Button>
+        {error && <span style={{ fontSize: 12, color: "var(--err)" }}>{error}</span>}
       </div>
-      <div style={{ display: "flex", gap: 8, padding: "10px 12px", borderRadius: 6, background: "var(--warn-soft)", color: "var(--warn)", fontSize: 12, alignItems: "flex-start" }}>
-        <Icon name="info" style={{ fontSize: 16 }} />
-        <span style={{ color: "var(--text)" }}>Remote intake (S3 / SFTP / URL) isn&rsquo;t built yet. Use Upload or Server folder for now.</span>
-      </div>
-    </div>
+      {insp && s.remote && (
+        <div style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <Icon name="cloud_done" style={{ color: "var(--ok)" }} />
+            <span style={{ flex: 1, fontFamily: "'Geist Mono',monospace", fontWeight: 500, overflowWrap: "anywhere" }}>{s.remote.display}</span>
+            {s.remote.sampled && <span style={{ fontSize: 11, padding: "2px 6px", borderRadius: 4, border: "1px solid var(--border-2)", color: "var(--text-3)" }}>sampled</span>}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 1, background: "var(--border)", border: "1px solid var(--border)", borderRadius: 6, overflow: "hidden" }}>
+            <Stat label="Rows" value={insp.row_estimate != null ? `${insp.exact ? "" : "~"}${insp.row_estimate.toLocaleString()}` : "counted during the load"} />
+            <Stat label="Columns" value={String(insp.columns.length)} />
+            <Stat label="Detected" value={fileFormatLabel(insp.format, insp.compression)} />
+            <Stat label="Size" value={insp.size_bytes != null ? fmtBytes(insp.size_bytes) : "—"} />
+          </div>
+          {s.remote.spec.match !== "exact" && <MatchLine summary={s.remote.match} />}
+        </div>
+      )}
+    </>
   );
 }
 

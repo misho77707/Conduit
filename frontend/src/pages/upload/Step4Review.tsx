@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
-import { jobsApi } from "../../lib/api";
+import { jobsApi, remoteApi, type RemoteMatchOut } from "../../lib/api";
 import { useToast } from "../../lib/toast";
 import { fileFormatLabel, statusBadge } from "../../lib/format";
 import { Icon } from "../../ui/Icon";
 import { Card } from "../../ui/Card";
 import { Button } from "../../ui/Button";
-import type { WizardState } from "./types";
+import { sourceMode, type WizardState } from "./types";
+import { remoteLabel } from "../remote/RemotePicker";
 import type { WizardCtx } from "./Wizard";
 import { buildJobIn } from "./jobBuilder";
 
@@ -14,6 +15,14 @@ interface Props { s: WizardState; set: (p: Partial<WizardState>) => void; ctx: W
 export function Step4Review({ s, set, ctx, onCreated }: Props) {
   const toast = useToast();
   const [running, setRunning] = useState(false);
+
+  // what a run would load from a remote newest / all source into this target (new / changed / already loaded)
+  const [targetMatch, setTargetMatch] = useState<RemoteMatchOut | null>(null);
+  useEffect(() => {
+    if (sourceMode(s) !== "remote" || !s.remote || s.remote.spec.match === "exact" || !s.targetConnId) return;
+    remoteApi.match(s.remote.spec, { connection_id: s.targetConnId, table: s.targetTable, mode: s.mode }).then(setTargetMatch).catch(() => setTargetMatch(null));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     set({ planLoading: true, planError: null });
@@ -28,9 +37,13 @@ export function Step4Review({ s, set, ctx, onCreated }: Props) {
   const included = s.columns.filter((c) => c.include);
   const plan = s.plan;
 
-  const sourceLabel = s.filePath ? s.uploadedName || s.filePath : s.sourceView === "query" ? "custom query" : s.sourceTable || "";
+  const mode = sourceMode(s);
+  const remote = mode === "remote" ? s.remote : null;
+  const sourceLabel = remote ? (remote.spec.match === "exact" ? remote.display : remoteLabel(remote.spec, ctx.conns))
+    : mode === "file" ? s.uploadedName || s.filePath || "" : s.sourceView === "query" ? "custom query" : s.sourceTable || "";
+  const fileSub = s.fileInspect ? `${fileFormatLabel(s.fileInspect.format, s.fileInspect.compression)} · ${s.fileInspect.columns.length} columns` : "";
   const summary = [
-    { k: "Source", v: sourceLabel, s: s.filePath ? (s.fileInspect ? `${fileFormatLabel(s.fileInspect.format, s.fileInspect.compression)} · ${s.fileInspect.columns.length} columns` : "") : sourceConn?.name || "" },
+    { k: "Source", v: sourceLabel, s: remote ? `${remote.spec.match === "exact" ? "one file" : remote.spec.match === "newest" ? "newest match" : "all matches"} · ${fileSub}` : mode === "file" ? fileSub : sourceConn?.name || "" },
     { k: "Schema", v: `${included.length} of ${s.columns.length || included.length} columns`, s: plan ? `${plan.target_columns.length} target columns` : "" },
     { k: "Target", v: targetConn?.name || "", s: s.targetTable + (plan?.target_exists ? " · existing" : s.tableMode === "new" && s.ddlText ? " · created with your edited DDL" : " · will be created") },
     { k: "Load mode", v: s.mode[0].toUpperCase() + s.mode.slice(1), s: s.mode === "upsert" ? `key: ${s.keys.join(", ") || "—"}` : `chunk ${s.chunk.toLocaleString()} rows` },
@@ -39,7 +52,22 @@ export function Step4Review({ s, set, ctx, onCreated }: Props) {
   ];
 
   const checks: { icon: string; c: string; t: string; s: string }[] = [];
-  if (s.filePath) {
+  if (remote) {
+    const m = targetMatch;
+    if (remote.spec.match === "exact" || !m) {
+      checks.push({ icon: "check_circle", c: "var(--ok)", t: "Remote file ready", s: `${remote.display}${remote.sampled ? " · previewed from a sample" : ""}` });
+    } else {
+      const loading = m.chosen.length;
+      const skipped = m.skip ? m.loaded_count : 0;
+      checks.push(loading
+        ? { icon: "check_circle", c: "var(--ok)", t: `${loading} file${loading === 1 ? "" : "s"} to load`, s: [m.new_count && `${m.new_count} new`, m.changed_count && `${m.changed_count} changed`, skipped && `${skipped} already loaded, skipped`].filter(Boolean).join(" · ") || `${m.total} matching` }
+        : { icon: "info", c: "var(--warn)", t: "Nothing new to load right now", s: m.notes[0] || "Every matching file is already loaded into this target: a run now finishes with 0 rows." });
+      const changedLoading = m.files.filter((f) => f.status === "changed" && m.chosen.includes(f.path)).length;
+      if (changedLoading && s.mode === "append") {
+        checks.push({ icon: "warning", c: "var(--warn)", t: `${changedLoading} changed file${changedLoading === 1 ? "" : "s"} load again`, s: "Overwritten in place since they were loaded: in append mode their rows are added again (upsert avoids duplicates)." });
+      }
+    }
+  } else if (mode === "file") {
     checks.push({ icon: "check_circle", c: "var(--ok)", t: "File ready", s: s.fileInspect ? `${fileFormatLabel(s.fileInspect.format, s.fileInspect.compression)} · ${s.fileInspect.row_estimate != null ? s.fileInspect.row_estimate.toLocaleString() : "unknown"} rows` : "" });
   } else if (sourceConn) {
     const b = statusBadge(sourceConn.status);
@@ -51,7 +79,7 @@ export function Step4Review({ s, set, ctx, onCreated }: Props) {
   }
   if (plan?.split_column) {
     checks.push({ icon: "check_circle", c: "var(--ok)", t: "Splitting in parallel", s: `${plan.split_column} · ${plan.workers} workers` });
-  } else if (!s.filePath) {
+  } else if (mode === "database") {
     checks.push({ icon: "info", c: "var(--accent)", t: "Single stream", s: "No split column chosen: the source is read in one piece." });
   }
   checks.push({ icon: "info", c: "var(--accent)", t: "No global snapshot", s: "Each split reads its own snapshot. Rows changing mid-run can be missed or read twice at split borders." });

@@ -114,6 +114,10 @@ class TableSchemaOut(BaseModel):
 class FileInspectIn(BaseModel):
     path: str = Field(min_length=1)
     sample_rows: int = Field(default=20, ge=1, le=1000)
+    # CSV overrides the wizard re-inspects with (None = auto-detect)
+    header: bool | None = None
+    skip_rows: int | None = Field(default=None, ge=0, le=100_000)
+    delimiter: str | None = Field(default=None, max_length=8)
 
 
 class FileEntryOut(BaseModel):

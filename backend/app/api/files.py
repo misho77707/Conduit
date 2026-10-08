@@ -20,7 +20,8 @@ router = APIRouter(prefix="/files", tags=["files"], dependencies=[Depends(curren
 async def inspect(body: FileInspectIn) -> FileInspectOut:
     """Inspect a file already on a mounted/server folder (must resolve inside an allowed root)."""
     try:
-        result: FileInspection = await run_in_threadpool(inspect_file, body.path, body.sample_rows)
+        opts = {"header": body.header, "skip_rows": body.skip_rows, "delimiter": body.delimiter}
+        result: FileInspection = await run_in_threadpool(inspect_file, body.path, body.sample_rows, opts)
     except (PathNotAllowed, UnsupportedFormat) as e:
         raise HTTPException(422, str(e)) from e
     except FileNotFoundError as e:

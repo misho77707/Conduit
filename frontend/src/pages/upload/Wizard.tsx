@@ -5,7 +5,7 @@ import { useToast } from "../../lib/toast";
 import { useTheme } from "../../lib/theme";
 import { Icon } from "../../ui/Icon";
 import { Button } from "../../ui/Button";
-import { initialWizardState, type WizardState } from "./types";
+import { initialWizardState, sourceMode, type WizardState } from "./types";
 import { Step1Source } from "./Step1Source";
 import { Step2Preview } from "./Step2Preview";
 import { Step3Target } from "./Step3Target";
@@ -63,9 +63,10 @@ export function Wizard() {
 
   const canNext = useMemo(() => {
     if (s.step === 1) {
-      if (s.filePath) return true;
-      if (s.sourceTab === "database") return s.sourceView === "query" ? !!s.sourceQuery.trim() : !!s.sourceTable;
-      return false;
+      const mode = sourceMode(s);
+      if (mode === "remote") return !!s.remote && !!s.fileInspect;
+      if (mode === "file") return !!s.filePath;
+      return s.sourceView === "query" ? !!s.sourceQuery.trim() : !!s.sourceTable;
     }
     if (s.step === 3) return !!s.targetConnId && !!s.targetTable.trim();
     return true;

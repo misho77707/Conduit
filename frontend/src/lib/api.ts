@@ -141,7 +141,8 @@ export interface FileInspectOut {
 export interface FileEntry { name: string; path: string; is_dir: boolean; size_bytes: number | null; modified_at: string | null; format: string | null; compression?: "gzip" | "zip" | null; }
 
 export const filesApi = {
-  inspect: (path: string, sampleRows = 20) => post<FileInspectOut>("/files/inspect", { path, sample_rows: sampleRows }),
+  inspect: (path: string, sampleRows = 20, opts?: { header?: boolean; skip_rows?: number; delimiter?: string | null }) =>
+    post<FileInspectOut>("/files/inspect", { path, sample_rows: sampleRows, ...(opts || {}) }),
   list: (path = "") => get<FileEntry[]>(`/files/list${path ? `?path=${encodeURIComponent(path)}` : ""}`),
   roots: () => get<string[]>("/files/roots"),
   upload: (file: File, onProgress?: (pct: number) => void): Promise<{ path: string; name: string; size_bytes: number }> => {
@@ -180,7 +181,47 @@ export interface FileSourceIn {
 }
 export interface SourceIn {
   connection_id?: string | null; table?: string | null; query?: string | null; where?: string; file?: FileSourceIn | null;
+  remote?: RemoteIn | null;
 }
+
+// ---- remote files (S3 / SFTP / HTTP): backend/app/engine/spec.py RemoteIn, backend/app/api/remote.py ----------
+
+export type RemoteMatch = "exact" | "newest" | "all";
+export interface RemoteIn {
+  connection_id: string | null; // an S3 / SFTP / HTTP connection; null = an ad-hoc public http(s) URL
+  path: string; // key / path / URL / pattern, relative to the connection's base
+  match: RemoteMatch;
+  skip_loaded: boolean; // newest / all: leave out files already loaded into the same target
+  format?: "csv" | "json" | "parquet" | "excel" | null; delimiter?: string | null; header?: boolean; encoding?: string;
+  sheet?: string | null; skip_rows?: number; null_values?: string[];
+}
+export interface RemoteEntryOut {
+  name: string; path: string; is_dir: boolean; size: number | null; modified: string | null;
+  format: string | null; compression: "gzip" | "zip" | null;
+}
+export interface RemoteMatchFile {
+  name: string; path: string; size: number | null; modified: string | null; format: string | null;
+  compression: "gzip" | "zip" | null; status: "new" | "changed" | "loaded" | null;
+}
+export interface RemoteMatchOut {
+  pattern: string; match: RemoteMatch; total: number; total_bytes: number; files: RemoteMatchFile[];
+  chosen: string[]; chosen_bytes: number; new_count: number; changed_count: number; loaded_count: number;
+  known_status: boolean; skip: boolean; more_left: number; unsupported: number; notes: string[];
+}
+export interface RemoteTargetRef { connection_id: string; table: string; mode: "append" | "replace" | "upsert"; }
+export interface RemoteInspectOut extends FileInspectOut {
+  remote: {
+    file: { name: string; path: string; display: string; size: number | null; modified: string | null; sampled: boolean };
+    match: RemoteMatchOut;
+  };
+}
+export const remoteApi = {
+  list: (connectionId: string, path = "") =>
+    get<RemoteEntryOut[]>(`/remote/${connectionId}/list${path ? `?path=${encodeURIComponent(path)}` : ""}`),
+  match: (remote: RemoteIn, target?: RemoteTargetRef | null) => post<RemoteMatchOut>("/remote/match", { remote, target: target ?? null }),
+  inspect: (remote: RemoteIn, sampleRows = 20, target?: RemoteTargetRef | null) =>
+    post<RemoteInspectOut>("/remote/inspect", { remote, sample_rows: sampleRows, target: target ?? null }),
+};
 export interface TargetIn {
   connection_id: string; table: string; mode: "append" | "replace" | "upsert"; keys: string[];
   create: boolean; order_by: string[]; partition_by?: string | null;
@@ -379,6 +420,8 @@ export interface PipelineOut {
   id: string; name: string; description: string; source: SourceIn; target: TargetIn; options: OptionsIn;
   steps: StepIn[]; output_columns: StepOutCol[] | null; schedule: string | null; enabled: boolean;
   next_run_at: string | null; created_at: string; updated_at: string; last_run: PipelineLastRun | null;
+  // the scheduler's last look at a remote newest / all source that had nothing new (no job is created then)
+  last_checked_at: string | null; last_check_note: string | null;
 }
 export interface PipelinePreviewOut {
   columns: StepOutCol[]; rows: Record<string, unknown>[]; sampled_rows: number; full_chain: boolean;

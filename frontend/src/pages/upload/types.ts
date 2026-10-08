@@ -1,4 +1,4 @@
-import type { ColumnOut, ConnectionOut, FileEntry, FileInspectOut, JobPlan, TableOut, TableSchemaOut } from "../../lib/api";
+import type { ColumnOut, ConnectionOut, FileEntry, FileInspectOut, JobPlan, RemoteIn, RemoteMatchOut, TableOut, TableSchemaOut } from "../../lib/api";
 
 export type SourceTab = "upload" | "server" | "remote" | "database";
 export type Strategy = "full" | "id" | "time" | "watermark";
@@ -15,6 +15,9 @@ export interface ColumnMapUI {
 export interface WizardState {
   step: 1 | 2 | 3 | 4;
   sourceTab: SourceTab;
+
+  // remote file source (S3 / SFTP / URL), once inspected; fileInspect / fileHeader / fileSkipRows are shared with local files
+  remote: RemoteSource | null;
 
   // file source
   filePath: string | null;
@@ -70,13 +73,28 @@ export interface WizardState {
   planError: string | null;
 }
 
+export interface RemoteSource {
+  spec: RemoteIn; // what the job sends (header / skip_rows are filled in from the wizard when it is built)
+  display: string; // the inspected file, e.g. s3://lake/exports/orders.csv (never a URL query string)
+  sampled: boolean; // previewed from the head / first rows only
+  match: RemoteMatchOut | null;
+}
+
+/** Where the load reads from, by the source tab: a local file (upload / server folder), a remote file, or a database. */
+export function sourceMode(s: WizardState): "file" | "remote" | "database" {
+  return s.sourceTab === "remote" ? "remote" : s.sourceTab === "database" ? "database" : "file";
+}
+
+/** A local or a remote file: previewed and loaded through the file reader, never range-split. */
+export const isFileLike = (s: WizardState) => sourceMode(s) !== "database";
+
 export function defaultColumnsFromNative(cols: ColumnOut[]): ColumnMapUI[] {
   return cols.map((c) => ({ source: c.name, name: c.name, type: "(auto)", include: true, nativeType: c.type }));
 }
 
 export function initialWizardState(targetConnId: string | null): WizardState {
   return {
-    step: 1, sourceTab: "upload",
+    step: 1, sourceTab: "upload", remote: null,
     filePath: null, fileInspect: null, fileHeader: true, fileSkipRows: 0,
     uploadState: "idle", uploadPct: 0, uploadedName: null, serverPath: "", serverEntries: null,
     sourceConnId: null, sourceView: "table", sourceTable: null, sourceQuery: "", tables: null, tableSchema: null,

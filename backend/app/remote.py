@@ -404,7 +404,7 @@ def inspect(session: Session, remote: RemoteIn, sample_rows: int = 20, tkey: str
     p = preview_file(c, e, remote.format)
     remember(session, conn, c)
     try:
-        res = inspect_local(p.local, sample_rows, fmt=remote.format)
+        res = inspect_local(p.local, sample_rows, fmt=remote.format, opts=remote.parse_options())
     except UnsupportedFormat as err:
         raise RemoteError(str(err)) from err
     res.path, res.size_bytes = c.display_path(e.path), e.size

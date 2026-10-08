@@ -1,4 +1,6 @@
-import type { CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { filesApi, remoteApi } from "../../lib/api";
+import { MatchLine } from "../remote/RemotePicker";
 import { AUTO_TYPE, LOGICAL_TYPES, TIMEZONES } from "../../lib/constants";
 import { fileFormatLabel, fmtN } from "../../lib/format";
 import { Icon } from "../../ui/Icon";
@@ -7,19 +9,39 @@ import { Select } from "../../ui/Input";
 import { SegmentedControl } from "../../ui/SegmentedControl";
 import { ToggleRow } from "../../ui/Toggle";
 import type { SplitCandidateOut } from "../../lib/api";
-import type { ColumnMapUI, Strategy, WizardState } from "./types";
+import { defaultColumnsFromNative, isFileLike, type ColumnMapUI, type Strategy, type WizardState } from "./types";
 import type { WizardCtx } from "./Wizard";
 
 interface Props { s: WizardState; set: (p: Partial<WizardState>) => void; ctx: WizardCtx; }
 
 export function Step2Preview({ s, set, ctx }: Props) {
-  return s.filePath ? <FilePreview s={s} set={set} /> : <DatabasePlan s={s} set={set} ctx={ctx} />;
+  return isFileLike(s) ? <FilePreview s={s} set={set} /> : <DatabasePlan s={s} set={set} ctx={ctx} />;
 }
 
 // ---- File: detected format + column grid + sample -------------------------------------
 
 function FilePreview({ s, set }: { s: WizardState; set: (p: Partial<WizardState>) => void }) {
   const insp = s.fileInspect;
+  const [reading, setReading] = useState(false);
+  const [readError, setReadError] = useState<string | null>(null);
+  const first = useRef(true);
+
+  // header / rows-to-skip change what the columns are: read the file again with them (local or remote)
+  useEffect(() => {
+    if (first.current) { first.current = false; return; }
+    const t = setTimeout(() => {
+      setReading(true);
+      setReadError(null);
+      const opts = { header: s.fileHeader, skip_rows: s.fileSkipRows };
+      const req = s.remote ? remoteApi.inspect({ ...s.remote.spec, ...opts }, 20) : s.filePath ? filesApi.inspect(s.filePath, 20, opts) : null;
+      req?.then((res) => set({ fileInspect: res, columns: defaultColumnsFromNative(res.columns) }))
+        .catch((e) => setReadError(e instanceof Error ? e.message : "Could not read the file"))
+        .finally(() => setReading(false));
+    }, 400);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [s.fileHeader, s.fileSkipRows]);
+
   if (!insp) return null;
   const updCol = (i: number, patch: Partial<ColumnMapUI>) => set({ columns: s.columns.map((c, j) => (j === i ? { ...c, ...patch } : c)) });
   const included = s.columns.filter((c) => c.include).length;
@@ -30,7 +52,10 @@ function FilePreview({ s, set }: { s: WizardState; set: (p: Partial<WizardState>
         <Card>
           <div style={{ padding: 14, display: "flex", flexDirection: "column", gap: 12 }}>
             <div style={{ fontWeight: 600 }}>Detected format</div>
+            {s.remote && <div style={{ fontFamily: "'Geist Mono',monospace", fontSize: 11, color: "var(--text-2)", overflowWrap: "anywhere" }}>{s.remote.display}</div>}
             <Row label="Format" value={fileFormatLabel(insp.format, insp.compression)} />
+            {reading && <div style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12, color: "var(--text-3)" }}><Icon name="progress_activity" spin style={{ fontSize: 14 }} />Reading again…</div>}
+            {readError && <div style={{ fontSize: 12, color: "var(--err)" }}>{readError}</div>}
             {insp.format === "csv" && (
               <label style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <input type="number" min={0} value={s.fileSkipRows} onChange={(e) => set({ fileSkipRows: Math.max(0, Number(e.target.value)) })} style={{ width: 56, height: 28, padding: "0 8px", borderRadius: 6, border: "1px solid var(--border-2)", background: "var(--surface)", fontFamily: "'Geist Mono',monospace", fontSize: 12 }} />
@@ -42,6 +67,15 @@ function FilePreview({ s, set }: { s: WizardState; set: (p: Partial<WizardState>
             )}
           </div>
         </Card>
+        {s.remote && s.remote.spec.match !== "exact" && (
+          <Card>
+            <div style={{ padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ fontWeight: 600 }}>{s.remote.spec.match === "all" ? "All matching files" : "Newest matching file"}</div>
+              <MatchLine summary={s.remote.match} />
+              <div style={{ fontSize: 12, color: "var(--text-3)" }}>{s.remote.spec.match === "all" ? "The preview shows the first file; every file needs the same column names." : "Each run picks the newest file again."}</div>
+            </div>
+          </Card>
+        )}
         {insp.notes.length > 0 && (
           <Card>
             <div style={{ padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>

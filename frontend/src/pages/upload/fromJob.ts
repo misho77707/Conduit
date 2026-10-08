@@ -1,5 +1,5 @@
 import { AUTO_TYPE } from "../../lib/constants";
-import { connectionsApi, filesApi, type ColumnOut, type JobIn } from "../../lib/api";
+import { connectionsApi, filesApi, remoteApi, type ColumnOut, type JobIn } from "../../lib/api";
 import { initialWizardState, type ColumnMapUI, type WizardState } from "./types";
 
 /** Wizard state that reproduces an earlier job's request (the inverse of jobBuilder.buildJobIn), for "Edit & re-run". */
@@ -8,7 +8,14 @@ export async function stateFromJob(spec: JobIn): Promise<WizardState> {
   const src = spec.source;
   let native: ColumnOut[] = [];
 
-  if (src.file) {
+  if (src.remote) {
+    const insp = await remoteApi.inspect(src.remote, 20);
+    native = insp.columns;
+    Object.assign(s, {
+      sourceTab: "remote", fileInspect: insp, fileHeader: src.remote.header ?? true, fileSkipRows: src.remote.skip_rows ?? 0,
+      remote: { spec: src.remote, display: insp.remote.file.display, sampled: insp.remote.file.sampled, match: insp.remote.match },
+    } satisfies Partial<WizardState>);
+  } else if (src.file) {
     const insp = await filesApi.inspect(src.file.path, 20);
     native = insp.columns;
     Object.assign(s, {
