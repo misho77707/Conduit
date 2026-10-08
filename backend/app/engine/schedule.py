@@ -87,12 +87,17 @@ def run_and_dispatch(pipeline_id) -> bool:
             return False
         queued = False
         user = _system_user(s)
-        if user is None:
+        go, note = _worth_running(s, p)
+        if not go:  # a remote source with nothing new: no job (it would only push real loads out of the Jobs list)
+            p.last_checked_at, p.last_check_note = utcnow(), note[:500]
+        elif user is None:
             log.error("pipeline %s is due but no active user exists to run it as", pipeline_id)
         else:
             try:
                 _launch(s, p, user)
                 queued = True
+                if note:
+                    p.last_checked_at, p.last_check_note = utcnow(), f"load started: {note}"[:500]
             except Exception:  # noqa: BLE001 - a broken pipeline must never take the scheduler down
                 log.exception("scheduled run of pipeline %s (%r) failed to queue", pipeline_id, p.name)
         # Always advance next_run_at, even on failure: a broken schedule waits for its next slot instead of
@@ -104,6 +109,21 @@ def run_and_dispatch(pipeline_id) -> bool:
         p.schedule_claimed_at = None
         s.commit()
     return queued
+
+
+def _worth_running(session: Session, p: Pipeline) -> tuple[bool, str]:
+    """Does a scheduled run have anything to do? Only a remote "newest" / "all" source with skip-loaded can say no:
+    the match is resolved first, and nothing new (or another load from it still running) means no job."""
+    if not (p.source or {}).get("remote"):
+        return True, ""
+    from ..remote import has_new_files
+
+    try:
+        return has_new_files(session, {"source": p.source, "target": p.target})
+    except Exception as e:  # noqa: BLE001 - e.g. the server is down: say so on the pipeline, try again next time
+        from .runner import short_error
+
+        return False, f"check failed: {short_error(e)}"
 
 
 def run_due(max_workers: int = 4) -> int:

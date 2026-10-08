@@ -16,7 +16,10 @@ from ..deps import current_user, current_user_sse
 from ..engine import joblog
 from ..engine.runner import JobError, make_plan, prepare, rejects_path, run_job, short_error, snapshot
 from ..engine.spec import JobIn
+from ..connectors.base import UserFacingError
 from ..engine.steps import StepError
+from ..remote import display as remote_display
+from ..remote import remove_job_dir
 from ..models import Job, JobSplit, User, utcnow
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -42,7 +45,7 @@ def _json(obj: Any) -> str:
 def _plan_or_422(spec: JobIn, session: Session, sample_rows: int) -> dict[str, Any]:
     try:
         return make_plan(prepare(spec, session), sample_rows=sample_rows)
-    except (JobError, StepError) as e:
+    except (JobError, StepError, UserFacingError) as e:  # UserFacingError: remote files (no match, too big, ...)
         raise HTTPException(422, str(e)) from e
     except (ValueError, FileNotFoundError, NotImplementedError) as e:
         raise HTTPException(422, str(e)) from e
@@ -75,15 +78,18 @@ def _dispatch(job: Job, session: Session) -> None:
 def _create(body: JobIn, session: Session, user: User) -> Job:
     try:
         prepare(body, session)  # catch a bad table, column or option now instead of after queueing
-    except (JobError, StepError) as e:
+    except (JobError, StepError, UserFacingError) as e:
         raise HTTPException(422, str(e)) from e
     except (ValueError, FileNotFoundError, NotImplementedError) as e:
         raise HTTPException(422, str(e)) from e
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, short_error(e)) from e
-    src = body.source.file.path if body.source.file else (body.source.table or "query")
+    if body.source.remote:
+        src = remote_display(body.source.remote, session)  # s3://bucket/exports/orders_*.csv; never a query string
+    else:
+        src = body.source.file.path if body.source.file else (body.source.table or "query")
     job = Job(
-        name=body.name or f"{src} → {body.target.table}", kind="file_load" if body.source.file else "transfer",
+        name=body.name or f"{src} → {body.target.table}", kind="file_load" if body.source.is_file else "transfer",
         spec=body.model_dump(mode="json"), source_conn_id=body.source.connection_id, target_conn_id=body.target.connection_id,
         workers=body.options.workers, owner_id=user.id,
     )
@@ -164,6 +170,7 @@ def delete_job(job_id: uuid.UUID, session: Session = Depends(get_session)) -> No
     if job.status in _ACTIVE:
         raise HTTPException(409, "Cancel the job before deleting it")
     rejects_path(job.id).unlink(missing_ok=True)
+    remove_job_dir(job.id)
     joblog.clear(job.id)
     session.delete(job)
     session.commit()

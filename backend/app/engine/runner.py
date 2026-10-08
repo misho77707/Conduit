@@ -32,12 +32,14 @@ from ..config import get_settings
 from ..db import get_engine, get_sessionmaker
 from ..models import Connection, Job, JobSplit, Watermark, utcnow
 from ..connectors import category_of
+from ..connectors.base import UserFacingError
 from ..services import build_connector
 from . import joblog
 from .adapters import PartialWrite, get_adapter
 from .arrowconv import _jsonable
 from .ddl import TargetOptions, split_statements, suggest_partition
-from .filesource import FileAdapter, FileSpec
+from ..files import UnsupportedFormat
+from .filesource import FileAdapter, FileSpec, MultiFileAdapter
 from .model import ReadRequest, SplitSpec, dec, enc
 from .spec import ColumnMap, JobIn, parse_bound
 from .steps import Step, apply_steps, compile_steps
@@ -105,6 +107,8 @@ def is_transient(e: BaseException) -> bool:
 
 def short_error(e: BaseException) -> str:
     msg = " ".join(str(e).split())
+    if isinstance(e, (JobError, UserFacingError)):  # already written for people: no exception class name
+        return msg[:400]
     return f"{type(e).__name__}: {msg}"[:400]
 
 
@@ -214,7 +218,7 @@ def rejects_path(job_id: uuid.UUID | str) -> Path:
 @dataclass
 class Prepared:
     spec: JobIn
-    src: Any  # Adapter | FileAdapter
+    src: Any  # Adapter | FileAdapter | MultiFileAdapter
     tgt: Any  # Adapter
     req: ReadRequest
     out: list[OutCol]
@@ -227,10 +231,16 @@ class Prepared:
     tgt_key: str
     notes: list[str] = field(default_factory=list)
     steps: list[Step] = field(default_factory=list)
+    remote: Any = None  # remote.RemoteCtx of a load job reading downloaded remote files
 
     @property
     def opts(self):
         return self.spec.options
+
+
+def is_file_source(src: Any) -> bool:
+    """A local file or one or more (downloaded / previewed) remote files: read in one piece per file."""
+    return isinstance(src, (FileAdapter, MultiFileAdapter))
 
 
 def _conn(session: Session, cid: uuid.UUID | None, role: str) -> Connection:
@@ -242,16 +252,34 @@ def _conn(session: Session, cid: uuid.UUID | None, role: str) -> Connection:
     return conn
 
 
-def prepare(spec: JobIn, session: Session) -> Prepared:
+def prepare(spec: JobIn, session: Session, job_id: uuid.UUID | None = None) -> Prepared:
+    """Validate a request and open its source and target. `job_id`: preparing a real run, so a remote source is
+    downloaded (once per job; a retry reuses the files) - without it, remote files are only previewed."""
     o, s, t = spec.options, spec.source, spec.target
     notes: list[str] = []
+    rctx = None
     # ---- source
+    if s.is_file and o.strategy != "full":
+        raise JobError("Files are always loaded whole: use the 'full' strategy")
     if s.file:
-        if o.strategy != "full":
-            raise JobError("Files are always loaded whole: use the 'full' strategy")
         src: Any = FileAdapter(FileSpec(**s.file.model_dump()))
         read_cols, suggest = src.read_columns(), {c.name: c for c in src.suggest_columns()}
         src_key = f"file:{s.file.path}"
+    elif s.remote:
+        from .. import remote as rmt
+
+        _conn(session, t.connection_id, "target")  # before downloading anything
+        tkey = rmt.target_key(t)
+        try:
+            if job_id is not None:
+                src, rctx = rmt.job_source(session, job_id, s.remote, tkey, t.mode)
+            else:
+                src = rmt.preview_source(session, s.remote, tkey, t.mode)
+        except (UnsupportedFormat, FileNotFoundError) as e:
+            raise JobError(str(e)) from e
+        notes += src.notes
+        read_cols, suggest = src.read_columns(), {c.name: c for c in src.suggest_columns()}
+        src_key = rmt.source_key(s.remote)
     else:
         sconn = _conn(session, s.connection_id, "source")
         src = get_adapter(build_connector(sconn))
@@ -333,7 +361,7 @@ def prepare(spec: JobIn, session: Session) -> Prepared:
             split_logical = by_name[split_col].logical
         elif split_col not in ("ctid", "_partition_id"):
             raise JobError(f"Split column {split_col!r} is not a column of the source")
-    if s.file and split_col:
+    if s.is_file and split_col:
         notes.append("Files are read in one piece; the split column is ignored")
         split_col = None
     req = ReadRequest(table=s.table, query=s.query, where=s.where, mode="full", split_col=split_col,
@@ -374,7 +402,7 @@ def prepare(spec: JobIn, session: Session) -> Prepared:
     except ValueError as e:
         raise JobError(str(e)) from e
     return Prepared(spec, src, tgt, req, out, Transformer(read_cols_sel, out), tgt_cols, bool(existing), unique,
-                    split_logical, src_key, tgt_key, notes, steps=compile_steps(spec.steps))
+                    split_logical, src_key, tgt_key, notes, steps=compile_steps(spec.steps), remote=rctx)
 
 
 # ---- planning ------------------------------------------------------------------------
@@ -384,7 +412,7 @@ def _filtered(req: ReadRequest) -> bool:
 
 
 def estimate_total(prep: Prepared) -> tuple[int | None, bool]:
-    if isinstance(prep.src, FileAdapter):
+    if is_file_source(prep.src):
         return prep.src.estimate_rows()
     total, exact = prep.src.estimate_rows(prep.req)
     if not exact and _filtered(prep.req) and (total is None or total <= EXACT_COUNT_MAX_ROWS):
@@ -397,8 +425,8 @@ def estimate_total(prep: Prepared) -> tuple[int | None, bool]:
 
 def split_count(prep: Prepared, total: int | None) -> int:
     o = prep.opts
-    if not prep.req.split_col or isinstance(prep.src, FileAdapter):
-        return 1
+    if not prep.req.split_col or is_file_source(prep.src):
+        return 1  # (several files: one split per file, whatever this says)
     if o.split_rows and total:
         n = math.ceil(total / o.split_rows)
     elif o.splits:
@@ -451,13 +479,13 @@ def layout(prep: Prepared, *, execute_target: bool) -> Layout:
         warnings.append("Replace empties the target table first: it stays incomplete until the job finishes.")
     if t.mode == "upsert" and prep.tgt.dialect == "clickhouse":
         warnings.append("ClickHouse upserts keep old versions until a background merge: read with FINAL to see one row per key.")
-    if len(splits) > 1 and not isinstance(prep.src, FileAdapter):
+    if len(splits) > 1 and not is_file_source(prep.src):
         warnings.append("Each split reads its own snapshot, so rows changing while the job runs can be missed or read twice "
                         "across split borders.")
-    if splits and splits[0].resumable and not prep.unique_split and t.mode != "upsert":
+    if splits and splits[0].resumable and splits[0].kind != "file" and not prep.unique_split and t.mode != "upsert":
         warnings.append(f"{prep.req.split_col} is not unique, so a split that fails midway cannot safely resume: it restarts "
                         "(append/replace) only if nothing was written yet.")
-    if not prep.req.split_col and not isinstance(prep.src, FileAdapter):
+    if not prep.req.split_col and not is_file_source(prep.src):
         prep.notes.append("No split column chosen: the table is read in one piece. Pick one to run in parallel.")
     if prep.tgt.max_writers < workers:
         prep.notes.append(f"{prep.tgt.dialect} allows {prep.tgt.max_writers} writer at a time: reads run in parallel, writes take turns.")
@@ -590,7 +618,11 @@ def _process_split(ctx: Ctx, idx: int, spec: SplitSpec, resume: Any) -> None:
     prep, o, t = ctx.prep, ctx.prep.opts, ctx.prep.spec.target
     sp = dataclasses.replace(spec, extra=dict(spec.extra))
     if resume is not None and spec.resumable:
-        sp.extra["resume_after" if prep.unique_split else "resume_from"] = resume
+        if spec.kind == "file":  # a fixed file: skip exactly the rows already committed
+            sp.extra["offset"] = resume
+        else:
+            sp.extra["resume_after" if prep.unique_split else "resume_from"] = resume
+    reject_prefix = prep.src.reject_prefix(spec) if hasattr(prep.src, "reject_prefix") else ""
     reader = Prefetcher(prep.src.read_batches(prep.req, sp, o.read_chunk), ctx.stop)
     writer = prep.tgt.open_writer(t.table, prep.target_cols, t.mode, t.keys)
     pending: list[pa.Table] = []
@@ -602,7 +634,7 @@ def _process_split(ctx: Ctx, idx: int, spec: SplitSpec, resume: Any) -> None:
         table = pa.concat_tables(pending) if len(pending) > 1 else (pending[0] if pending else None)
         written, rejects = _write_rows(ctx, writer, table) if table is not None and table.num_rows else (0, [])
         for reason, row in rejects:
-            ctx.sink.add(idx, reason, row)
+            ctx.sink.add(idx, reject_prefix + reason, row)
         _bump(ctx.job_id, idx, read=pending_read, written=written, rejected=pending_rej + len(rejects), resume=last_key)
         if ctx.sink.exceeded:
             raise TooManyRejects(f"More than {o.max_rejects} rows were rejected (see the rejects file); stopping.")
@@ -617,7 +649,7 @@ def _process_split(ctx: Ctx, idx: int, spec: SplitSpec, resume: Any) -> None:
             b_table = apply_steps(prep.steps, batch.table) if prep.steps else batch.table
             table, rej = prep.tf.apply(b_table)
             for reason, row in rej:
-                ctx.sink.add(idx, reason, row)
+                ctx.sink.add(idx, reject_prefix + reason, row)
             pending_read += batch.table.num_rows + len(batch.rejects)
             pending_rej += len(batch.rejects) + len(rej)
             if table.num_rows:
@@ -649,6 +681,10 @@ def _run_split(ctx: Ctx, idx: int) -> None:
             _process_split(ctx, idx, spec, resume)
             _bump(ctx.job_id, idx, status="done", finished_at=utcnow())
             joblog.push(ctx.job_id, "info", f"{tag} finished")
+            rc = prep.remote
+            if rc is not None and rc.record:  # its rows are committed: a later run with skip-loaded leaves it out
+                from ..remote import record_load
+                record_load(rc.skey, rc.tkey, rc.records[spec.extra.get("file", idx)], ctx.job_id)
             return
         except Cancelled:
             _bump(ctx.job_id, idx, status="cancelled", finished_at=utcnow())
@@ -660,7 +696,8 @@ def _run_split(ctx: Ctx, idx: int) -> None:
             with get_sessionmaker()() as s:
                 cur = s.get(JobSplit, (ctx.job_id, idx))
                 resume, rows_before = dec(cur.resume), cur.rows_written
-            can_resume = spec.resumable and resume is not None and (prep.unique_split or prep.spec.target.mode == "upsert")
+            can_resume = spec.resumable and resume is not None and (
+                spec.kind == "file" or prep.unique_split or prep.spec.target.mode == "upsert")
             safe = rows_before == 0 or prep.spec.target.mode == "upsert" or can_resume
             if is_transient(e) and attempts <= o.retries and safe:
                 wait_s = min(2 ** attempts, 20)
@@ -695,6 +732,9 @@ def _finish(job_id: uuid.UUID, status: str, error: str | None, ctx: Ctx | None, 
         s.commit()
     if ctx:
         ctx.sink.close()
+    if status == "succeeded":  # downloads are only kept for a Retry of a failed / cancelled job
+        from ..remote import remove_job_dir
+        remove_job_dir(job_id)
     prune_finished()
 
 
@@ -763,7 +803,13 @@ def run_job(job_id: uuid.UUID | str) -> str:
         try:
             with _Beat(jid):
                 spec = JobIn.model_validate(job.spec)
-                prep = prepare(spec, s)
+                if spec.source.remote is not None:
+                    from ..remote import overlapping_job
+
+                    if other := overlapping_job(s, job.spec, job):
+                        raise JobError(f"Another job ({other.name}, {other.status}) is loading from this source into this "
+                                       "target: two loads with 'skip files already loaded' would load the same new files twice.")
+                prep = prepare(spec, s, job_id=jid)
                 if first_run:
                     joblog.push(jid, "info", "planning")
                     lay = layout(prep, execute_target=True)
@@ -781,7 +827,17 @@ def run_job(job_id: uuid.UUID | str) -> str:
                     joblog.push(jid, "info", f"{len(lay.splits)} splits on {prep.req.split_col or 'the whole source'}, {lay.workers} workers")
                     s.commit()
         except Exception as e:  # noqa: BLE001
-            msg = str(e) if isinstance(e, JobError) else short_error(e)
+            from ..remote import NothingToLoad
+
+            if isinstance(e, NothingToLoad):  # every matching remote file is already loaded: a 0-row success
+                job.status, job.finished_at, job.splits_total = "succeeded", utcnow(), 0
+                job.rows_read = job.rows_written = job.rows_rejected = 0
+                job.plan = {**(job.plan or {}), "notes": [str(e)], "warnings": []}
+                s.commit()
+                joblog.push(jid, "info", f"nothing to load: {e}")
+                prune_finished()
+                return "succeeded"
+            msg = short_error(e)
             job.status, job.error, job.finished_at = "failed", msg[:1000], utcnow()
             s.commit()
             joblog.push(jid, "error", f"could not start: {msg}")
@@ -850,8 +906,11 @@ def prune_finished() -> None:
     with get_sessionmaker()() as s:
         old = list(s.scalars(select(Job).where(Job.status.in_(("succeeded", "failed", "cancelled")))
                              .order_by(Job.finished_at.desc().nullslast(), Job.created_at.desc()).offset(keep)))
+        from ..remote import remove_job_dir
+
         for j in old:
             rejects_path(j.id).unlink(missing_ok=True)
+            remove_job_dir(j.id)
             joblog.clear(j.id)
             s.execute(delete(JobSplit).where(JobSplit.job_id == j.id))
             s.delete(j)

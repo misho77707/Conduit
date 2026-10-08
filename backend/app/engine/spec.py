@@ -28,15 +28,52 @@ class ColumnMap(BaseModel):
         return clean(v) if v else v
 
 
-class FileIn(BaseModel):
-    path: str
-    format: Literal["csv", "json", "parquet", "excel"] | None = None
+class ParseOptions(BaseModel):
+    """How a file is read: shared by local files (FileIn) and remote ones (RemoteIn)."""
+
+    format: Literal["csv", "json", "parquet", "excel"] | None = None  # detected from the name when empty
     delimiter: str | None = Field(None, max_length=8)
     header: bool = True
     encoding: str = "utf-8"
     sheet: str | None = None
     skip_rows: int = Field(0, ge=0, le=100_000)
     null_values: list[str] = Field(default_factory=lambda: [""])
+
+    def parse_options(self) -> dict[str, Any]:
+        return self.model_dump(include=set(ParseOptions.model_fields))
+
+
+class FileIn(ParseOptions):
+    path: str
+
+
+_GLOB = ("*", "?", "[")
+
+
+class RemoteIn(ParseOptions):
+    """A file on S3 / SFTP / behind a URL. Credentials stay in the connection; only the path is stored here."""
+
+    connection_id: uuid.UUID | None = None  # an S3 / SFTP / HTTP connection; None = an ad-hoc public http(s) URL
+    path: str = Field(min_length=1, max_length=4000)  # key / remote path / URL / pattern, relative to the base
+    match: Literal["exact", "newest", "all"] = "exact"  # one file / the newest match / every match (one job)
+    skip_loaded: bool = True  # newest / all: leave out files already loaded into the same target
+
+    @model_validator(mode="after")
+    def _check(self) -> "RemoteIn":
+        p = self.path.strip()
+        url = p.lower().startswith(("http://", "https://"))
+        if self.connection_id is None:
+            if not url:
+                raise ValueError("A remote file without a connection must be a full http:// or https:// URL")
+            if self.match != "exact":
+                raise ValueError("A URL is one file: 'newest' and 'all' need an S3 or SFTP connection")
+        if not url and any(s == ".." for s in p.replace("\\", "/").split("/")):
+            raise ValueError("Remote paths may not contain '..': they are relative to the connection's base folder")
+        pattern = not url and any(ch in p for ch in _GLOB)
+        if pattern and self.match == "exact":
+            raise ValueError("The path is a pattern: choose 'newest' or 'all' matching files, or give one exact file")
+        self.path = p
+        return self
 
 
 class SourceIn(BaseModel):
@@ -45,19 +82,25 @@ class SourceIn(BaseModel):
     query: str | None = None
     where: str = ""  # SQL condition (MongoDB: a JSON filter)
     file: FileIn | None = None
+    remote: RemoteIn | None = None
 
     @model_validator(mode="after")
     def _one_source(self) -> "SourceIn":
-        given = [x for x in (self.table, self.query, self.file) if x]
+        given = [x for x in (self.table, self.query, self.file, self.remote) if x]
         if len(given) != 1:
-            raise ValueError("Give exactly one of: table, query, file")
-        if self.file is None and self.connection_id is None:
+            raise ValueError("Give exactly one of: table, query, file, remote")
+        if self.file is None and self.remote is None and self.connection_id is None:
             raise ValueError("connection_id is required for a table or query source")
         return self
 
     @property
     def kind(self) -> str:
-        return "file" if self.file else "query" if self.query else "table"
+        return "file" if self.file else "remote" if self.remote else "query" if self.query else "table"
+
+    @property
+    def is_file(self) -> bool:
+        """A local or a remote file (read through the file adapter, never a database table)."""
+        return self.file is not None or self.remote is not None
 
 
 class TargetIn(BaseModel):

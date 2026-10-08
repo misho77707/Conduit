@@ -101,7 +101,7 @@ class S3Connector(StorageConnector):
     def _entry(self, key: str, size: int | None, modified, etag: str | None) -> RemoteEntry:
         rel = self._rel(key)
         return RemoteEntry(name=posixpath.basename(rel), path=rel, size=size, modified=modified,
-                           etag=(etag or "").strip('"') or None)
+                           etag=(etag or "").strip('"') or None, full=f"s3://{self.bucket}/{key}")
 
     def list(self, path: str) -> list[RemoteEntry]:
         base = self._key(path)

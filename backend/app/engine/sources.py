@@ -5,6 +5,7 @@ subclass SourceUnavailable (the database / driver failed, 502).
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -13,7 +14,8 @@ from ..connectors import category_of
 from ..models import Connection
 from ..services import build_connector
 from .adapters import get_adapter
-from .filesource import FileAdapter, FileSpec
+from ..connectors.storage import RemoteError
+from .filesource import FileAdapter, FileSpec, MultiFileAdapter
 from .runner import JobError, short_error
 from .spec import SourceIn
 from .types import ColSpec
@@ -32,10 +34,22 @@ def source_connection(session: Session, s: SourceIn, role: str = "source") -> Co
     return conn
 
 
-def source_adapter(session: Session, s: SourceIn, role: str = "source") -> Any:
+def source_adapter(session: Session, s: SourceIn, role: str = "source", full_dir: Path | None = None) -> Any:
+    """`full_dir`: read a remote source in full (Compare), downloading it there; otherwise it is only previewed."""
     if s.file:
         try:
             return FileAdapter(FileSpec(**s.file.model_dump()))
+        except (FileNotFoundError, ValueError) as e:
+            raise JobError(str(e)) from e
+    if s.remote:
+        from .. import remote
+
+        try:
+            if full_dir is not None:
+                return remote.compare_source(session, s.remote, full_dir)
+            return remote.preview_source(session, s.remote)
+        except RemoteError as e:
+            raise JobError(str(e)) from e
         except (FileNotFoundError, ValueError) as e:
             raise JobError(str(e)) from e
     return get_adapter(build_connector(source_connection(session, s, role)))
@@ -43,7 +57,7 @@ def source_adapter(session: Session, s: SourceIn, role: str = "source") -> Any:
 
 def raw_columns(src: Any, s: SourceIn, role: str = "source") -> list[ColSpec]:
     """The columns a source yields, as its batches will carry them."""
-    if isinstance(src, FileAdapter):
+    if isinstance(src, (FileAdapter, MultiFileAdapter)):
         return src.read_columns()
     if s.table:
         try:

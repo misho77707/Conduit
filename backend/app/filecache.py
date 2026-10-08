@@ -14,8 +14,30 @@ import time
 from pathlib import Path
 
 from .config import get_settings
+from .connectors.base import UserFacingError
 
 _lock = threading.Lock()
+
+SPACE_MARGIN_BYTES = 1024 ** 3  # always leave at least 1 GB free ...
+SPACE_MARGIN_RATIO = 0.10  # ... plus 10% of what is about to be written
+
+
+class NotEnoughSpace(UserFacingError):
+    pass
+
+
+def ensure_space(where: Path, need_bytes: int, what: str) -> None:
+    """Fail early, with numbers, when writing `need_bytes` under `where` would fill the disk."""
+    probe = where
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    free = shutil.disk_usage(probe).free
+    want = int(need_bytes * (1 + SPACE_MARGIN_RATIO)) + SPACE_MARGIN_BYTES
+    if want > free:
+        gb = 1024 ** 3
+        raise NotEnoughSpace(f"Not enough free disk space for {what}: it needs {need_bytes / gb:,.1f} GB "
+                             f"(+ a safety margin), but only {free / gb:,.1f} GB is free in {probe}. "
+                             "Free some space, or narrow what is loaded.")
 
 
 def root() -> Path:

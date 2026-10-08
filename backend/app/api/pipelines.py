@@ -41,7 +41,7 @@ def _out(p: Pipeline, last_job: Job | None) -> PipelineOut:
     return PipelineOut(id=p.id, name=p.name, description=p.description, source=p.source, target=p.target,
                        options=p.options, steps=p.steps, output_columns=p.output_columns, schedule=p.schedule,
                        enabled=p.enabled, next_run_at=p.next_run_at, created_at=p.created_at, updated_at=p.updated_at,
-                       last_run=last_run)
+                       last_run=last_run, last_checked_at=p.last_checked_at, last_check_note=p.last_check_note)
 
 
 def _next_run_for(schedule: str | None, enabled: bool):
@@ -136,7 +136,7 @@ def _validate_shape(source: dict, target: dict, options: dict, steps: list) -> N
         raise HTTPException(422, f"Invalid pipeline: {short_error(e)}") from e
     if steps and o.split_column:
         raise HTTPException(422, "Pipelines read the whole source in one piece; a split column is not supported yet")
-    if steps and s.file and o.strategy != "full":
+    if steps and s.is_file and o.strategy != "full":
         raise HTTPException(422, "Files are always loaded whole: use the 'full' strategy")
     try:
         compile_steps(step_models)

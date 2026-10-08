@@ -193,10 +193,40 @@ class Pipeline(Base):
     schedule_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # a
     # scheduled run is in progress (same optimistic-claim pattern as ServiceCheck.claimed_at)
     last_job_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True)
+    # The scheduler's last look at a remote "newest / all" source that had nothing new (no job is created then,
+    # so these are the only trace of it): when, and what it found ("no new files matching ...").
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_check_note: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     owner_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class RemoteLoad(Base):
+    """A remote file already loaded into a target, so a "newest" / "all" run with skip-loaded leaves it out.
+
+    Written when the file's split finishes (its rows are committed in the target then), not when the whole job
+    succeeds. `path` is the full resolved location (s3://bucket/key, sftp://host:port/abs/path, URL without its
+    query string) so editing a connection's prefix or base path never makes old files look new.
+    """
+
+    __tablename__ = "remote_loads"
+    __table_args__ = (
+        UniqueConstraint("source_key", "target_key", "path_hash", "version", name="uq_remote_load"),
+        Index("ix_remote_loads_pair", "source_key", "target_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_key: Mapped[str] = mapped_column(String(400))  # "remote:<connection id>" or "remote:url"
+    target_key: Mapped[str] = mapped_column(String(400))  # "<connection id>:<table>"
+    path: Mapped[str] = mapped_column(Text)
+    path_hash: Mapped[str] = mapped_column(String(64))  # sha256(path): S3 keys alone can be 1024 bytes
+    version: Mapped[str] = mapped_column(String(300))  # ETag, or size:mtime (SFTP)
+    size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    modified: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    loaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class Comparison(Base):

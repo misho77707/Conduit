@@ -158,7 +158,7 @@ class HTTPConnector(StorageConnector):
             except (TypeError, ValueError):
                 modified = None
         return RemoteEntry(name=_filename(resp, str(resp.url)), path=path, size=size, modified=modified,
-                           etag=(resp.headers.get("etag") or "").strip('"') or None)
+                           etag=(resp.headers.get("etag") or "").strip('"') or None, full=mask_url(self.url(path)))
 
     def _probe(self, path: str) -> tuple[RemoteEntry, bool, str]:
         """(entry, server supports byte ranges, content type). HEAD first, then a 1-byte ranged GET."""

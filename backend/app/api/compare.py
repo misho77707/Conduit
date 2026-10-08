@@ -21,6 +21,7 @@ from ..deps import current_user
 from ..engine.runner import JobError, short_error
 from ..engine.sources import SourceUnavailable
 from ..models import Comparison, User, utcnow
+from ..remote import name_of
 
 router = APIRouter(prefix="/compare", tags=["compare"])
 
@@ -37,6 +38,8 @@ def _request_error(e: JobError) -> HTTPException:
 
 
 def _label(side: Any) -> str:
+    if side.remote:
+        return name_of(side.remote.path)
     return side.table or ("file " + side.file.path.rsplit("/", 1)[-1] if side.file else "query")
 
 

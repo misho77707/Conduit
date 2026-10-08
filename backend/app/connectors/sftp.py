@@ -156,7 +156,12 @@ class SFTPConnector(StorageConnector):
 
         t = self._transport()
         try:
-            yield paramiko.SFTPClient.from_transport(t)
+            sftp = paramiko.SFTPClient.from_transport(t)
+            try:  # the absolute base folder (resolves a base relative to the user's home), for RemoteEntry.full
+                self._root_abs = sftp.normalize(self._abs(""))
+            except OSError:
+                self._root_abs = "/" + clean_path(self._abs(""))
+            yield sftp
         finally:
             t.close()
 
@@ -172,9 +177,12 @@ class SFTPConnector(StorageConnector):
     # ---- filesystem ------------------------------------------------------------------
     def _entry(self, rel: str, a) -> RemoteEntry:
         is_dir = stat.S_ISDIR(a.st_mode or 0)
+        host, port = str(self.config.get("host", "")).strip(), int(self.config.get("port") or 22)
+        root = getattr(self, "_root_abs", "") or "/"
         return RemoteEntry(
             name=posixpath.basename(rel), path=rel, is_dir=is_dir, size=None if is_dir else a.st_size,
-            modified=datetime.fromtimestamp(a.st_mtime, tz=timezone.utc) if a.st_mtime else None)
+            modified=datetime.fromtimestamp(a.st_mtime, tz=timezone.utc) if a.st_mtime else None,
+            full=f"sftp://{host}:{port}{posixpath.join(root, rel) if rel else root}")
 
     def list(self, path: str) -> list[RemoteEntry]:
         rel = clean_path(path)

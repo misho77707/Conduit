@@ -187,6 +187,9 @@ class PipelineOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     last_run: PipelineLastRunOut | None = None
+    # the scheduler's last look at a remote newest / all source that had nothing new (no job was created then)
+    last_checked_at: datetime | None = None
+    last_check_note: str | None = None
 
 
 class PipelinePreviewIn(BaseModel):

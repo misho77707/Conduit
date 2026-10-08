@@ -120,7 +120,7 @@ def pair_columns(src_cols: list[ColSpec], tgt_cols: list[ColSpec], wanted: list[
 def suggest_keys(session, source: SourceIn, target: SourceIn, pairs: list[Pair]) -> tuple[list[str], str]:
     """The target table's primary key (else the source's), as target column names, when all of it is compared."""
     for role, side, on_target in (("target", target, True), ("source", source, False)):
-        if not (side.table and side.connection_id and not side.file):
+        if not (side.table and side.connection_id and not side.is_file):
             continue
         try:
             schema = build_connector(source_connection(session, side, role)).inspect(side.table)
@@ -149,10 +149,13 @@ def describe(session, source: SourceIn, target: SourceIn) -> dict[str, Any]:
     }
 
 
-def resolve(session, spec: CompareIn) -> Resolved:
-    src = source_adapter(session, spec.source, "source")
+def resolve(session, spec: CompareIn, work: Path | None = None) -> Resolved:
+    """`work`: the comparison is running, so a remote side is downloaded in full under work/remote/ (only
+    previewed otherwise, e.g. when validating the request)."""
+    full = (lambda role: work / "remote" / role) if work is not None else (lambda role: None)  # noqa: E731
+    src = source_adapter(session, spec.source, "source", full_dir=full("source"))
     s_cols = raw_columns(src, spec.source, "source")
-    tgt = source_adapter(session, spec.target, "target")
+    tgt = source_adapter(session, spec.target, "target", full_dir=full("target"))
     t_cols = raw_columns(tgt, spec.target, "target")
     pairs, us, ut = pair_columns(s_cols, t_cols, spec.columns)
     names = [p.name for p in pairs]
@@ -430,7 +433,7 @@ def run_comparison(cid: uuid.UUID | str) -> str:
     started = time.monotonic()
     try:
         with get_sessionmaker()() as s:
-            r = resolve(s, spec)
+            r = resolve(s, spec, work)
         summary = _execute(cid, spec, r, work)
         summary["seconds"] = round(time.monotonic() - started, 2)
         summary["options"] = spec.options.model_dump()
@@ -502,6 +505,7 @@ def _execute(cid: uuid.UUID, spec: CompareIn, r: Resolved, work: Path) -> dict[s
         con.close()
         work_db.unlink(missing_ok=True)
         Path(str(work_db) + ".wal").unlink(missing_ok=True)
+        shutil.rmtree(work / "remote", ignore_errors=True)  # downloaded remote sides: read into DuckDB, not needed now
 
 
 # ---- housekeeping / reading state ----------------------------------------------------------

@@ -111,8 +111,9 @@ def detect_format(path: Path) -> str:
     return fmt or ""
 
 
-def materialize(path: Path) -> Path:
-    """The file to actually read: the path itself, or (for a .zip) its data file unpacked into the file cache."""
+def materialize(path: Path, unpack_dir: Path | None = None) -> Path:
+    """The file to actually read: the path itself, or (for a .zip) its data file unpacked - into `unpack_dir` (a
+    job's own folder, deleted with it) or else into the shared, size-capped file cache."""
     if split_compression(path.name)[1] != "zip":
         return path
     from . import filecache
@@ -120,19 +121,28 @@ def materialize(path: Path) -> Path:
 
     m = zip_member(path)
     st = path.stat()
-    key = f"unzip:{path}:{st.st_size}:{st.st_mtime_ns}:{m.filename}"
     name = posixpath.basename(m.filename)
-    if hit := filecache.lookup(key, name):
-        return hit
     cap = get_settings().remote_max_file_mb * 1024 * 1024
     if m.file_size > cap:
         raise UnsupportedFormat(f"{name} inside {path.name} is larger than the {cap // 1024 // 1024:,} MB limit")
-    dest = filecache.target(key, name)
+    if unpack_dir is not None:
+        dest = unpack_dir / f"{path.stem}__{filecache.safe_name(name)}"
+        if dest.is_file() and dest.stat().st_size == m.file_size:
+            return dest  # unpacked by an earlier run of the same job
+        unpack_dir.mkdir(parents=True, exist_ok=True)
+        filecache.ensure_space(unpack_dir, m.file_size, f"unpacking {name} from {path.name}")
+    else:
+        key = f"unzip:{path}:{st.st_size}:{st.st_mtime_ns}:{m.filename}"
+        if hit := filecache.lookup(key, name):
+            return hit
+        dest = filecache.target(key, name)
+        filecache.ensure_space(dest.parent, m.file_size, f"unpacking {name} from {path.name}")
     part = dest.with_name(dest.name + ".part")
     with zipfile.ZipFile(path) as zf, zf.open(m) as src, part.open("wb") as out:
         shutil.copyfileobj(src, out, 1024 * 1024)
     part.replace(dest)
-    filecache.evict(keep=dest)
+    if unpack_dir is None:
+        filecache.evict(keep=dest)
     return dest
 
 

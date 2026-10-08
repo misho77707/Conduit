@@ -46,6 +46,9 @@ class RemoteEntry:
     size: int | None = None
     modified: datetime | None = None
     etag: str | None = None  # S3 ETag / HTTP ETag; None for SFTP (size + mtime identify a version there)
+    # The full resolved location (s3://bucket/key, sftp://host:port/abs/path, URL without query string): what
+    # identifies "the same file" across runs even if the connection's prefix / base path is edited later.
+    full: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
