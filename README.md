@@ -12,7 +12,10 @@ a reject file), the **React frontend** (login, connections, the upload/transfer 
 screen — and host/job panels) and **Pipelines** end to end — saved read → transform → load recipes, a
 3-column builder, and a **schedule editor** too: pipelines actually run on their own cron, with a real UI
 to set it (`pages/pipelines/ScheduleModal.tsx`) — all reusing the same load engine, no mock data anywhere.
-Not yet built: remote intake (S3/SFTP/URL, watched folder), Avro/ORC, and Control & Setup.
+**Remote intake** too: files on S3 (or MinIO / R2 / Wasabi), SFTP or behind a URL load anywhere a local file
+can (wizard, pipelines including schedules, Compare), one file / the newest match / all matches, with
+skip-already-loaded; `.gz` and `.zip` work for local and remote files alike.
+Not yet built: a watched folder, Avro/ORC, and Control & Setup.
 
 ## Run it
 
@@ -42,9 +45,12 @@ backend/app/
   security.py        scrypt passwords, JWT, Fernet credential encryption
   models.py          users, connections (current health state lives on the row), jobs, service checks
   services.py        test/serialize/encrypt helpers shared by API and worker
-  files.py           file inspect: columns, row estimate, preview (DuckDB + openpyxl)
+  files.py           file inspect: columns, row estimate, preview (DuckDB + openpyxl); .gz / .zip handling
+  remote.py          remote intake: matching, skip-loaded, previews, per-job downloads (manifest), Compare downloads
+  filecache.py       size-capped LRU cache for previews / unpacked archives, and the free-disk-space check
   api/               auth, connections, files, jobs, monitor, pipelines
-  connectors/        one class per database: connect, test, inspect (base.py is the interface)
+  connectors/        one class per database: connect, test, inspect (base.py is the interface); S3 / SFTP /
+                     HTTP are "storage" connectors with one filesystem interface (storage.py)
   engine/            the load engine
     spec.py            job request (what the wizard sends), pipeline step / schema models, bound parsing
     runner.py          planning, parallel splits, retry/resume/cancel, progress, ETA, rejects
@@ -89,7 +95,10 @@ frontend/design/      the original Claude Design prototype (reference only, not 
 | GET | /connections/{id}/tables | tables with catalog row estimates |
 | GET | /connections/{id}/tables/{table}/inspect | columns, keys/indexes, ranked split candidates |
 | POST | /files/upload | browser upload into `/data/uploads/...`, returns the path (max 2 GB) |
-| POST | /files/inspect | inspect a file under an allowed root: columns, row estimate, preview |
+| POST | /files/inspect | inspect a file under an allowed root: columns, row estimate, preview (`header` / `skip_rows` / `delimiter` override CSV detection) |
+| GET | /remote/{connection_id}/list | one folder of an S3 / SFTP connection (`?path=`): folders first, size, modified, format |
+| POST | /remote/match | `{remote, target?}`: the files a run would pick now: total, bytes, newest, new / changed / already loaded |
+| POST | /remote/inspect | `{remote, sample_rows, target?}`: the file inspect shape for the (first) matching file + the match summary |
 | POST | /jobs/plan | dry run: columns, DDL, splits, row estimate, timed sample. Writes nothing |
 | POST | /jobs | create and start a job (transfer or file load) |
 | GET | /jobs | running first, then the latest finished ones |
@@ -198,8 +207,10 @@ silence: press retry. A redelivered task never runs a job twice (heartbeat guard
   `FINAL`); large targets get a monthly partition suggestion. MySQL/MariaDB writes are pure-Python
   (about 26k rows/s per writer when measured), so raise `workers`. SQLite and DuckDB accept one writer at a time.
 - MongoDB: `_id` ObjectIds become strings on the way out; append is at-least-once, upsert is by key.
-- Excel: `.xlsx` only (`.xls` is refused with a message). Avro/ORC, S3/SFTP/URL intake and watched folders
-  are not built yet.
+- Excel: `.xlsx` only (`.xls` is refused with a message). Avro/ORC and watched folders are not built yet.
+- Files (local or remote) are one split each and resume by **row offset**: a Retry continues a half-loaded
+  file after its last committed batch instead of starting it over. Rows the reader rejected count as read, so
+  they are not retried (they are in the reject file).
 
 ## Monitor
 
@@ -313,8 +324,91 @@ column, with pause/resume in the row menu.
   don't paste in a pipeline you wouldn't otherwise just run.
 - **Progress/ETA is approximate** for a pipeline with a `filter` step: the row-count estimate comes from
   the raw source, not the post-filter output, so the progress bar can look like it plateaus near the end.
-- **Remote intake isn't built.** A pipeline's `source` is today's table/query/file — S3, SFTP, a URL and
-  a watched folder (all in the design) aren't sources yet.
+- **Remote files** work as a pipeline source (see Remote files). A scheduled pipeline whose remote source is
+  "newest" / "all" with skip-loaded is checked first: nothing new means **no job** (only "last checked …,
+  no new files" on the pipeline, shown in the list and the schedule dialog), so an hourly schedule never
+  pushes real loads out of the 10 kept jobs. A manual Run with nothing new still makes a 0-row job.
+  A watched folder isn't built.
+
+## Remote files (S3 / SFTP / URL)
+
+A file in an S3 bucket, on an SFTP server or behind a URL can be used anywhere a local file can: the wizard's
+Remote tab, pipelines (including schedules) and Compare. They all go through `SourceIn.remote`
+(`engine/spec.py` `RemoteIn`) and `app/remote.py`.
+
+**Connections.** Credentials live in saved connections (a separate **File storage** group on the Connections
+page), encrypted like database passwords and never stored in a job, pipeline or comparison:
+
+| Type | Settings | Secrets | Test |
+|---|---|---|---|
+| `s3` | bucket, region, prefix, endpoint URL + path-style (MinIO, R2, Wasabi) | access key ID + secret (empty = the server's IAM role), session token | lists one key under the prefix |
+| `sftp` | host, port, user, base path | password and/or private key (Ed25519 / ECDSA / RSA, PEM or OpenSSH) + passphrase | lists the base path |
+| `http` | base URL | headers, one `Name: value` per line | `HEAD`, else a 1-byte ranged `GET` |
+
+SFTP host keys are **trusted on first use**: the first successful connection stores the server's SHA-256
+fingerprint; any later mismatch is a hard error, in tests, reads and health checks ("host key changed").
+"Forget" in the edit dialog clears it. HTTP redirects (up to 5) are followed by hand so the secret headers
+only ever go to the connection's own host. A public file needs no connection: type its URL. A URL's query
+string (pre-signed links carry tokens there) never shows up in job names, logs, notes or errors. Storage
+connections are never a database: they are hidden from every database picker and refused with a 422 by
+tables / inspect, jobs, pipelines, Monitor query checks and Compare.
+
+**Which files** (`match`): `exact` one file; `newest` the most recently modified file matching a pattern
+(ties: name, descending); `all` every match, loaded in **one job, one split per file** (in name order,
+`workers` at a time). Patterns are relative to the connection's base: `*` and `?` stay within a folder, `**`
+spans folders, `..` is refused. Files that are not CSV / TSV / JSON / Parquet / Excel (or `.gz` / `.zip` of
+them) are left out with a note. With `all`, columns come from the first file; every other file must have the
+same column names (any order) or the job fails before writing, naming the file. Rejects name their file.
+
+**Skip files already loaded** (default on; ignored for `exact`): a file is recorded in `remote_loads` as soon
+as its split finishes (its rows are committed), by its **full resolved location** (`s3://bucket/key`,
+`sftp://host:port/abs/path`, URL without query) + version (ETag, or size + mtime), per source connection +
+target table. So a failed `all` job that finished 3 of 5 files never reloads those 3 in a fresh run, and
+editing a connection's prefix does not make old files look new. A file overwritten in place shows as
+**changed** (and loads again; in append mode that adds its rows again: the Review step warns). Nothing new =
+the job succeeds with 0 rows and a note. **Replace + all** ignores skip (a plan note says so): every run
+replaces the target with every matching file. Two loads with skip on for the same source and target never run
+at once: the later one fails at start ("another job is loading from this source into this target").
+
+**Where the bytes go.** A load downloads its files first, into `<data>/remote/jobs/<job id>/` (streamed to
+`*.part`, renamed when complete, `CONDUIT_REMOTE_MAX_FILE_MB` per file, at most `CONDUIT_REMOTE_MAX_FILES` per
+run) after checking **free disk space** (total + 10% + 1 GB), and writes a `manifest.json`. A Retry reuses the
+manifest and the files: it never re-resolves `newest` / `all`, so a file that arrived after the failure is not
+picked up. The folder is deleted as soon as the job succeeds; a failed or cancelled job keeps it for Retry
+until the job is pruned or deleted. With skip on and more new files than the per-run cap, the first ones (by
+name) load and the rest are left for the next run. Compare downloads a remote side in full into its own work
+folder (same space check), deleted after the diff.
+
+**Previews never download a big file.** Wizard inspect, `/jobs/plan`, pipeline preview and Compare's column
+screen fetch a file whole only up to `CONDUIT_REMOTE_INSPECT_FULL_MB` (default 200 MB), or for Excel / `.zip`
+(they can't be sampled). Bigger text files are read from their first 8 MB (a `.gz` is decompressed only that
+far) and their row count is "counted during the load"; bigger Parquet files give schema + exact row count from
+the footer and only the first rows (a row group over 64 MB is streamed, never loaded whole). A big JSON *array*
+file can't be previewed from its head (NDJSON can). Previews are cached under `<data>/remote/cache/` by
+location + version, capped at `CONDUIT_REMOTE_CACHE_MB` (least recently used out).
+
+| Setting | Default | |
+|---|---|---|
+| `CONDUIT_REMOTE_MAX_FILE_MB` | 20480 | biggest remote file (or file unpacked from a .zip) |
+| `CONDUIT_REMOTE_MAX_FILES` | 500 | files per "all" run |
+| `CONDUIT_REMOTE_INSPECT_FULL_MB` | 200 | previews download files whole up to this size |
+| `CONDUIT_REMOTE_CACHE_MB` | 2048 | preview / unpack cache size |
+| `CONDUIT_REMOTE_TIMEOUT_S` | 60 | per request to a remote server |
+| `CONDUIT_REMOTE_LIST_MAX` | 100000 | entries a pattern may scan under its folder |
+
+**Compressed files** (local and remote): `.csv.gz`, `.tsv.gz`, `.json.gz`, `.ndjson.gz`, `.jsonl.gz` are read
+directly; a `.zip` must contain exactly one CSV / TSV / JSON / Parquet / Excel file (`__MACOSX/` and dotfiles
+ignored), otherwise a 422 naming what it found. Compressed Parquet / Excel is refused (already compressed).
+
+**Limits.** A 20 GB file needs 20 GB + margin of free disk while it loads (downloaded first; one at a time per
+job, all of a job's files kept until it succeeds) and is downloaded again by a new job (not by a Retry). Very
+many small files work but each is one split with its own download and reader: thousands per run are slow,
+hence the per-run cap. A pattern over an S3 prefix with millions of keys lists them all (S3 has no server-side
+glob; the listing starts at the pattern's fixed folder): keep fixed folders in the pattern
+(`exports/2026/10/*.csv`, not `**/*.csv`), or the scan stops at `CONDUIT_REMOTE_LIST_MAX`. HTTP sources are
+single files (no browsing / patterns). Behind a TLS-intercepting proxy (a corporate root CA), HTTPS downloads
+fail with `CERTIFICATE_VERIFY_FAILED` until the CA is trusted inside the containers: mount it and set
+`SSL_CERT_FILE` (HTTP) and `AWS_CA_BUNDLE` (S3) in `docker-compose.yml` for `api` and `worker` (never empty).
 
 ## Compare
 
@@ -368,8 +462,9 @@ UI separately: `cd frontend && npm install && npm run dev` (Vite's dev server pr
 :5173.
 
 **Adapted from the mockup, deliberately, because the backend doesn't do these (yet):**
-- Remote intake (S3 / SFTP / URL) is a disabled placeholder tab — not built server-side. Upload and
-  Server folder are both real (the latter needed a small new endpoint, `GET /files/list`).
+- All four source tabs are real: Upload, Server folder (`GET /files/list`), Remote (S3 / SFTP / URL, see
+  Remote files) and Database. The Remote tab's format picker only appears when a file's name says nothing
+  about its format.
 - No SSH tunnel toggle or per-connection "include in health checks" toggle: neither exists in the
   connector/health-check code, so the add-connection form only exposes real fields (SSL mode,
   `read_only` / `create_if_missing` for file databases, `tls` / `auth_source` for MongoDB).
@@ -544,3 +639,16 @@ celery -A app.worker.celery_app beat --loglevel=info
   re-fetching its own copy on every open. Confirmed the flash is gone by screenshotting the same dialog open
   repeatedly.
 - The design-system screen is the one remaining unbuilt placeholder (see Frontend, above).
+- **Remote intake** was verified live through the running stack's API (the same endpoints the UI calls; jobs on
+  the real Celery worker, schedules on the real beat) against MinIO (endpoint + path-style) and `atmoz/sftp`:
+  connection tests and health status, a wrong S3 secret explained, browsing (folders first, format through
+  `.gz` / `.zip`), the newest-match pick, Parquet and `.zip` inspect, exact / newest / all loads, `.csv.gz` and
+  `.zip` loads, an SFTP "all" load, a second "newest" run finishing with 0 rows and "no new files", Compare
+  with a remote side (identical), editing the S3 connection without its secret, a prefix edit not making loaded
+  files look new, a pre-signed (token-in-query) URL loaded with the signature never shown, a `* * * * *`
+  pipeline that loaded the newest SFTP file on one slot and on the next left "No new files" without creating a
+  job, and an SFTP host-key change (recreated server) refused in tests and reads. **Not verified live**: the
+  browser click-through of the new screens (no browser in that session; the frontend type-checks and builds),
+  and a public HTTPS URL (the test machine sits behind a TLS-intercepting proxy; see Remote files, Limits).
+  S3 runs in the test suite against moto, SFTP against an in-process paramiko server, HTTP against
+  `http.server`.

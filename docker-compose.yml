@@ -22,6 +22,16 @@ x-backend: &backend
     CONDUIT_HEALTH_CHECK_INTERVAL_S: ${CONDUIT_HEALTH_CHECK_INTERVAL_S:-30}
     CONDUIT_KEEP_FINISHED_JOBS: ${CONDUIT_KEEP_FINISHED_JOBS:-10}
     CONDUIT_MONITOR_DISKS: ${CONDUIT_MONITOR_DISKS:-} # extra disks for the Monitor, e.g. "/mnt/big:Big disk"
+    # Remote intake (S3 / SFTP / URL files): see README "Remote files"
+    CONDUIT_REMOTE_MAX_FILE_MB: ${CONDUIT_REMOTE_MAX_FILE_MB:-20480}
+    CONDUIT_REMOTE_MAX_FILES: ${CONDUIT_REMOTE_MAX_FILES:-500}
+    CONDUIT_REMOTE_INSPECT_FULL_MB: ${CONDUIT_REMOTE_INSPECT_FULL_MB:-200}
+    CONDUIT_REMOTE_CACHE_MB: ${CONDUIT_REMOTE_CACHE_MB:-2048}
+    CONDUIT_REMOTE_TIMEOUT_S: ${CONDUIT_REMOTE_TIMEOUT_S:-60}
+    CONDUIT_REMOTE_LIST_MAX: ${CONDUIT_REMOTE_LIST_MAX:-100000}
+    # Behind a TLS-intercepting proxy, mount its root CA into api + worker (e.g. ./certs/ca.pem:/certs/ca.pem:ro)
+    # and add SSL_CERT_FILE: /certs/ca.pem and AWS_CA_BUNDLE: /certs/ca.pem here (never set them empty: OpenSSL
+    # would then trust nothing).
   volumes:
     - ./data:/data # uploads, rejects, SQLite/DuckDB files: drop files here
   depends_on:
