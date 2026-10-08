@@ -135,10 +135,10 @@ export const connectionsApi = {
 // ---- files ------------------------------------------------------------------------
 
 export interface FileInspectOut {
-  path: string; format: string; columns: ColumnOut[]; row_estimate: number | null; exact: boolean;
+  path: string; format: string; compression?: "gzip" | "zip" | null; columns: ColumnOut[]; row_estimate: number | null; exact: boolean;
   size_bytes: number | null; preview: Record<string, unknown>[]; notes: string[];
 }
-export interface FileEntry { name: string; path: string; is_dir: boolean; size_bytes: number | null; modified_at: string | null; format: string | null; }
+export interface FileEntry { name: string; path: string; is_dir: boolean; size_bytes: number | null; modified_at: string | null; format: string | null; compression?: "gzip" | "zip" | null; }
 
 export const filesApi = {
   inspect: (path: string, sampleRows = 20) => post<FileInspectOut>("/files/inspect", { path, sample_rows: sampleRows }),

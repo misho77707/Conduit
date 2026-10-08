@@ -122,12 +122,14 @@ class FileEntryOut(BaseModel):
     is_dir: bool
     size_bytes: int | None = None
     modified_at: datetime | None = None
-    format: str | None = None  # None for directories and unsupported extensions
+    format: str | None = None  # None for directories and unsupported extensions (a .zip: the format inside it)
+    compression: str | None = None  # gzip | zip
 
 
 class FileInspectOut(BaseModel):
     path: str
     format: str
+    compression: str | None = None  # gzip | zip
     columns: list[ColumnOut]
     row_estimate: int | None = None
     exact: bool = False

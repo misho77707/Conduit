@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { jobsApi } from "../../lib/api";
 import { useToast } from "../../lib/toast";
-import { statusBadge } from "../../lib/format";
+import { fileFormatLabel, statusBadge } from "../../lib/format";
 import { Icon } from "../../ui/Icon";
 import { Card } from "../../ui/Card";
 import { Button } from "../../ui/Button";
@@ -30,7 +30,7 @@ export function Step4Review({ s, set, ctx, onCreated }: Props) {
 
   const sourceLabel = s.filePath ? s.uploadedName || s.filePath : s.sourceView === "query" ? "custom query" : s.sourceTable || "";
   const summary = [
-    { k: "Source", v: sourceLabel, s: s.filePath ? (s.fileInspect ? `${s.fileInspect.format.toUpperCase()} · ${s.fileInspect.columns.length} columns` : "") : sourceConn?.name || "" },
+    { k: "Source", v: sourceLabel, s: s.filePath ? (s.fileInspect ? `${fileFormatLabel(s.fileInspect.format, s.fileInspect.compression)} · ${s.fileInspect.columns.length} columns` : "") : sourceConn?.name || "" },
     { k: "Schema", v: `${included.length} of ${s.columns.length || included.length} columns`, s: plan ? `${plan.target_columns.length} target columns` : "" },
     { k: "Target", v: targetConn?.name || "", s: s.targetTable + (plan?.target_exists ? " · existing" : s.tableMode === "new" && s.ddlText ? " · created with your edited DDL" : " · will be created") },
     { k: "Load mode", v: s.mode[0].toUpperCase() + s.mode.slice(1), s: s.mode === "upsert" ? `key: ${s.keys.join(", ") || "—"}` : `chunk ${s.chunk.toLocaleString()} rows` },
@@ -40,7 +40,7 @@ export function Step4Review({ s, set, ctx, onCreated }: Props) {
 
   const checks: { icon: string; c: string; t: string; s: string }[] = [];
   if (s.filePath) {
-    checks.push({ icon: "check_circle", c: "var(--ok)", t: "File ready", s: s.fileInspect ? `${s.fileInspect.format.toUpperCase()} · ${s.fileInspect.row_estimate != null ? s.fileInspect.row_estimate.toLocaleString() : "unknown"} rows` : "" });
+    checks.push({ icon: "check_circle", c: "var(--ok)", t: "File ready", s: s.fileInspect ? `${fileFormatLabel(s.fileInspect.format, s.fileInspect.compression)} · ${s.fileInspect.row_estimate != null ? s.fileInspect.row_estimate.toLocaleString() : "unknown"} rows` : "" });
   } else if (sourceConn) {
     const b = statusBadge(sourceConn.status);
     checks.push({ icon: b.icon, c: b.fg, t: sourceConn.status === "err" ? "Source unreachable" : "Source reachable", s: `${sourceConn.name} · ${sourceConn.note || sourceConn.host}` });

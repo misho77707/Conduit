@@ -15,7 +15,7 @@ import duckdb
 import pyarrow as pa
 
 from ..connectors.paths import resolve_allowed
-from ..files import detect_format
+from ..files import detect_format, materialize, split_compression
 from .arrowconv import conform, rows_to_table_lenient
 from .ddl import qi
 from .model import Batch, ReadRequest, SplitSpec
@@ -45,14 +45,18 @@ class FileAdapter:
 
     dialect = "file"
 
-    def __init__(self, spec: FileSpec):
+    def __init__(self, spec: FileSpec, *, trusted: Path | None = None, label: str | None = None):
+        """`trusted`: a local copy Conduit made itself (a remote download), read without the allowed-roots check."""
         self.spec = spec
-        self.path: Path = resolve_allowed(spec.path)
-        if not self.path.exists() or not self.path.is_file():
-            raise FileNotFoundError(f"{self.path} does not exist")
-        self.format = spec.format or detect_format(self.path)
-        if self.path.suffix.lower() == ".xls":
+        self.source: Path = trusted if trusted is not None else resolve_allowed(spec.path)  # what the user named
+        if not self.source.exists() or not self.source.is_file():
+            raise FileNotFoundError(f"{self.source} does not exist")
+        self.inner_name, self.compression = split_compression(self.source.name)
+        self.format = spec.format or detect_format(self.source)
+        if self.inner_name.lower().endswith(".xls") and self.format == "excel":
             raise ValueError("Legacy .xls files are not supported: save the sheet as .xlsx or .csv")
+        self.path: Path = materialize(self.source)  # what is actually read (a .zip's data file, unpacked)
+        self.label = label or self.source.name
         self.notes: list[str] = []
         self.max_writers = 0
 
@@ -64,7 +68,7 @@ class FileAdapter:
                     "store_rejects=true", f"nullstr=[{', '.join(_q(v) for v in s.null_values)}]", "null_padding=false"]
             if all_text:
                 opts.append("all_varchar=true")
-            delim = s.delimiter or ("\t" if self.path.suffix.lower() == ".tsv" else None)
+            delim = s.delimiter or ("\t" if self.inner_name.lower().endswith(".tsv") or self.path.suffix.lower() == ".tsv" else None)
             if delim:
                 opts.append(f"delim={_q(delim)}")
             if s.skip_rows:
@@ -159,10 +163,13 @@ class FileAdapter:
                 return max((ws.max_row or 1) - (1 if self.spec.header else 0) - self.spec.skip_rows, 0), True
             finally:
                 wb.close()
+        gz = self.compression == "gzip"
         con = duckdb.connect()
         try:
-            if self.format == "parquet" or exact or size <= _EXACT_COUNT_MAX_BYTES:
+            if self.format == "parquet" or exact or size <= _EXACT_COUNT_MAX_BYTES // (5 if gz else 1):
                 return int(con.sql(f"SELECT count(*) FROM {self._relation()}").fetchone()[0]), True
+            if gz:  # compressed bytes say little about the row count: counted during the load instead
+                return None, False
             sample = con.sql(f"SELECT count(*) FROM (SELECT * FROM {self._relation()} LIMIT 20000)").fetchone()[0]
             with self.path.open("rb") as f:
                 head = f.read(min(size, 8 * 1024 * 1024))
@@ -175,7 +182,7 @@ class FileAdapter:
         return None
 
     def plan_splits(self, req: ReadRequest, n: int) -> list[SplitSpec]:
-        return [SplitSpec(0, self.path.name, "full")]  # one reader per file; DuckDB parallelises inside it
+        return [SplitSpec(0, self.label, "full")]  # one reader per file; DuckDB parallelises inside it
 
     def read_batches(self, req: ReadRequest, split: SplitSpec, batch_rows: int) -> Iterator[Batch]:
         if self.format == "excel":

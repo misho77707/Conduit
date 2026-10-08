@@ -3,9 +3,16 @@
 Uses DuckDB for CSV/TSV, JSON/NDJSON and Parquet (all three are auto-detected natively), and
 openpyxl for Excel, which DuckDB cannot read without an extra extension. This mirrors
 Connector.inspect(): cheap-as-possible metadata plus a small sample, no full-table transforms.
+
+Compressed files: `.csv.gz` / `.tsv.gz` / `.json.gz` / `.ndjson.gz` / `.jsonl.gz` are read directly (DuckDB
+decompresses gzip on the fly). A `.zip` must hold exactly one supported data file (`__MACOSX/` and dotfiles
+are ignored); it is unpacked once into the file cache (app/filecache.py) and read from there.
 """
 from __future__ import annotations
 
+import posixpath
+import shutil
+import zipfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -27,6 +34,9 @@ _FORMATS = {
 }
 
 
+_GZIP_OK = {"csv", "json"}  # gzip-compressed text; Parquet / Excel are compressed already
+
+
 class UnsupportedFormat(ValueError):
     pass
 
@@ -36,6 +46,7 @@ class FileInspection:
     path: str
     format: str
     columns: list[ColumnInfo]
+    compression: str | None = None  # gzip | zip
     row_estimate: int | None = None
     exact: bool = False
     size_bytes: int | None = None
@@ -46,11 +57,83 @@ class FileInspection:
         return asdict(self)
 
 
-def detect_format(path: Path) -> str:
-    fmt = _FORMATS.get(path.suffix.lower())
+def split_compression(name: str) -> tuple[str, str | None]:
+    """("orders.csv", "gzip") for "orders.csv.gz"; ("orders.zip", "zip") for a zip; (name, None) otherwise."""
+    low = name.lower()
+    if low.endswith(".gz"):
+        return name[:-3], "gzip"
+    if low.endswith(".zip"):
+        return name, "zip"
+    return name, None
+
+
+def format_from_name(name: str) -> tuple[str | None, str | None]:
+    """(format, compression) from a file name alone. A .zip's format is only known after looking inside (None)."""
+    inner, comp = split_compression(name)
+    if comp == "zip":
+        return None, "zip"
+    fmt = _FORMATS.get(posixpath.splitext(inner.lower())[1])
     if fmt is None:
-        raise UnsupportedFormat(f"Unsupported file extension: {path.suffix or '(none)'}")
-    return fmt
+        raise UnsupportedFormat(f"Unsupported file extension: {posixpath.splitext(name)[1] or '(none)'}")
+    if comp == "gzip" and fmt not in _GZIP_OK:
+        raise UnsupportedFormat(f"{name}: only CSV / TSV / JSON files can be read gzip-compressed "
+                                "(Parquet and Excel files are compressed already)")
+    return fmt, comp
+
+
+def zip_member(path: Path) -> zipfile.ZipInfo:
+    """The one supported data file inside a zip (folders, __MACOSX/ and dotfiles ignored)."""
+    try:
+        with zipfile.ZipFile(path) as zf:
+            members = [m for m in zf.infolist() if not m.is_dir() and not m.filename.startswith("__MACOSX/")
+                       and not posixpath.basename(m.filename).startswith(".")]
+    except zipfile.BadZipFile as e:
+        raise UnsupportedFormat(f"{path.name} is not a valid zip archive") from e
+    data = []
+    for m in members:
+        try:
+            fmt, comp = format_from_name(posixpath.basename(m.filename))
+        except UnsupportedFormat:
+            continue
+        if comp is None and fmt:
+            data.append(m)
+    if len(data) != 1:
+        found = ", ".join(posixpath.basename(m.filename) for m in members[:6]) or "nothing"
+        raise UnsupportedFormat(f"{path.name} must contain exactly one CSV / TSV / JSON / Parquet / Excel file "
+                                f"(found {len(data)} among: {found})")
+    return data[0]
+
+
+def detect_format(path: Path) -> str:
+    fmt, comp = format_from_name(path.name)
+    if comp == "zip":
+        return format_from_name(posixpath.basename(zip_member(path).filename))[0] or ""
+    return fmt or ""
+
+
+def materialize(path: Path) -> Path:
+    """The file to actually read: the path itself, or (for a .zip) its data file unpacked into the file cache."""
+    if split_compression(path.name)[1] != "zip":
+        return path
+    from . import filecache
+    from .config import get_settings
+
+    m = zip_member(path)
+    st = path.stat()
+    key = f"unzip:{path}:{st.st_size}:{st.st_mtime_ns}:{m.filename}"
+    name = posixpath.basename(m.filename)
+    if hit := filecache.lookup(key, name):
+        return hit
+    cap = get_settings().remote_max_file_mb * 1024 * 1024
+    if m.file_size > cap:
+        raise UnsupportedFormat(f"{name} inside {path.name} is larger than the {cap // 1024 // 1024:,} MB limit")
+    dest = filecache.target(key, name)
+    part = dest.with_name(dest.name + ".part")
+    with zipfile.ZipFile(path) as zf, zf.open(m) as src, part.open("wb") as out:
+        shutil.copyfileobj(src, out, 1024 * 1024)
+    part.replace(dest)
+    filecache.evict(keep=dest)
+    return dest
 
 
 def _duckdb_source(path: Path, fmt: str) -> str:
@@ -62,19 +145,21 @@ def _duckdb_source(path: Path, fmt: str) -> str:
     return f"read_parquet('{p}')"
 
 
-def _inspect_tabular(path: Path, fmt: str, size: int, sample_rows: int) -> FileInspection:
+def _inspect_tabular(path: Path, fmt: str, size: int, sample_rows: int, gz: bool = False) -> FileInspection:
     con = duckdb.connect()
     try:
         src = _duckdb_source(path, fmt)
         rel = con.sql(f"select * from {src}")
         columns = [ColumnInfo(name=n, type=str(t)) for n, t in zip(rel.columns, rel.types)]
         preview = [dict(zip(rel.columns, r)) for r in con.sql(f"select * from {src} limit {sample_rows}").fetchall()]
-        if fmt == "parquet" or size <= _EXACT_COUNT_MAX_BYTES:
+        limit = _EXACT_COUNT_MAX_BYTES // (5 if gz else 1)  # gzip text unpacks to roughly 5x its size
+        if fmt == "parquet" or size <= limit:
             row_estimate, exact = con.sql(f"select count(*) from {src}").fetchone()[0], True
             notes: list[str] = []
         else:
             row_estimate, exact = None, False
-            notes = [f"File is larger than {_EXACT_COUNT_MAX_BYTES // (1024 * 1024)} MB: row count is not pre-counted."]
+            notes = [f"File is larger than {limit // (1024 * 1024)} MB{' compressed' if gz else ''}: "
+                     "row count is not pre-counted."]
     finally:
         con.close()
     return FileInspection(path=str(path), format=fmt, columns=columns, row_estimate=row_estimate, exact=exact,
@@ -114,8 +199,20 @@ def inspect_file(path_str: str, sample_rows: int = 20) -> FileInspection:
     path = resolve_allowed(path_str)
     if not path.exists() or not path.is_file():
         raise FileNotFoundError(f"{path} does not exist")
-    fmt = detect_format(path)
+    return inspect_local(path, sample_rows)
+
+
+def inspect_local(path: Path, sample_rows: int = 20, fmt: str | None = None) -> FileInspection:
+    """Inspect a file already known to be safe to read (an allowed path, or a cached / downloaded copy)."""
+    _, comp = split_compression(path.name)
+    fmt = fmt or detect_format(path)
     size = path.stat().st_size
+    data = materialize(path)
     if fmt == "excel":
-        return _inspect_excel(path, size, sample_rows)
-    return _inspect_tabular(path, fmt, size, sample_rows)
+        res = _inspect_excel(data, size, sample_rows)
+    else:
+        res = _inspect_tabular(data, fmt, size, sample_rows, gz=comp == "gzip")
+    res.path, res.compression = str(path), comp
+    if comp == "zip":
+        res.notes.insert(0, f"Read from {data.name} inside the zip archive.")
+    return res

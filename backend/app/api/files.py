@@ -10,7 +10,7 @@ from fastapi.concurrency import run_in_threadpool
 from ..config import get_settings
 from ..connectors.paths import PathNotAllowed, resolve_allowed
 from ..deps import current_user
-from ..files import FileInspection, UnsupportedFormat, detect_format, inspect_file
+from ..files import FileInspection, UnsupportedFormat, detect_format, inspect_file, split_compression
 from ..schemas import FileEntryOut, FileInspectIn, FileInspectOut
 
 router = APIRouter(prefix="/files", tags=["files"], dependencies=[Depends(current_user)])
@@ -35,20 +35,21 @@ def _list_dir(path: str) -> list[FileEntryOut]:
     if not target.exists() or not target.is_dir():
         raise NotADirectoryError(f"{target} is not a directory")
     out = []
+    own = {Path(get_settings().remote_dir).resolve(), Path(get_settings().compare_dir).resolve()}  # Conduit's work folders
     for p in sorted(target.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
-        if p.name.startswith("."):
+        if p.name.startswith(".") or p.resolve() in own:
             continue
         is_dir = p.is_dir()
-        fmt = None
+        fmt = comp = None
         if not is_dir:
             try:
-                fmt = detect_format(p)
+                fmt, comp = detect_format(p), split_compression(p.name)[1]
             except UnsupportedFormat:
                 fmt = None
         st = p.stat()
         out.append(FileEntryOut(
             name=p.name, path=str(p), is_dir=is_dir, size_bytes=None if is_dir else st.st_size,
-            modified_at=datetime.fromtimestamp(st.st_mtime, tz=timezone.utc), format=fmt,
+            modified_at=datetime.fromtimestamp(st.st_mtime, tz=timezone.utc), format=fmt, compression=comp,
         ))
     return out
 

@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     max_workers_per_job: int = 32
     keep_comparisons: int = 10  # only the latest finished source/target comparisons (and their result files) are kept
 
+    # Remote intake (S3 / SFTP / HTTP files) and compressed files
+    remote_timeout_s: int = 60  # per request to a remote server (a download streams; this is the idle limit)
+    remote_max_file_mb: int = 20_480  # one remote file (or one file unpacked from a .zip) may not be bigger than this
+    remote_max_files: int = 500  # an "all matching files" run loads at most this many files
+    remote_inspect_full_mb: int = 200  # previews download a file whole up to this size; bigger ones are sampled
+    remote_cache_mb: int = 2_048  # previews / unpacked archives are cached up to this total, least recently used out
+    remote_list_max: int = 100_000  # a pattern may scan at most this many entries under its folder
+
     # Monitor
     monitor_disks: str = ""  # extra disks to show: "path[:label],path[:label]" (paths as seen inside the container)
     monitor_warn_pct: int = 85  # CPU / memory / disk level above which the monitor says "High"
@@ -52,6 +60,11 @@ class Settings(BaseSettings):
     @property
     def rejects_dir(self) -> str:
         return f"{self.data_dir.rstrip('/')}/rejects"
+
+    @property
+    def remote_dir(self) -> str:
+        """Per-job downloads (remote/jobs/<job id>/) and the preview / unpack cache (remote/cache/)."""
+        return f"{self.data_dir.rstrip('/')}/remote"
 
     @property
     def compare_dir(self) -> str:

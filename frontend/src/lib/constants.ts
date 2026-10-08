@@ -21,4 +21,4 @@ export const TIMEZONES: { v: string; l: string }[] = [
   { v: "Asia/Tokyo", l: "Asia/Tokyo" },
 ];
 
-export const SUPPORTED_FILE_FORMATS = ["CSV / TSV", "JSON / NDJSON", "Excel .xlsx", "Parquet"];
+export const SUPPORTED_FILE_FORMATS = ["CSV / TSV", "JSON / NDJSON", "Excel .xlsx", "Parquet", ".gz (CSV / JSON)", ".zip (one file)"];

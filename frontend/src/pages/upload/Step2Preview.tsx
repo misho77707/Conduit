@@ -1,6 +1,6 @@
 import type { CSSProperties } from "react";
 import { AUTO_TYPE, LOGICAL_TYPES, TIMEZONES } from "../../lib/constants";
-import { fmtN } from "../../lib/format";
+import { fileFormatLabel, fmtN } from "../../lib/format";
 import { Icon } from "../../ui/Icon";
 import { Card, CardHeader } from "../../ui/Card";
 import { Select } from "../../ui/Input";
@@ -30,7 +30,7 @@ function FilePreview({ s, set }: { s: WizardState; set: (p: Partial<WizardState>
         <Card>
           <div style={{ padding: 14, display: "flex", flexDirection: "column", gap: 12 }}>
             <div style={{ fontWeight: 600 }}>Detected format</div>
-            <Row label="Format" value={insp.format.toUpperCase()} />
+            <Row label="Format" value={fileFormatLabel(insp.format, insp.compression)} />
             {insp.format === "csv" && (
               <label style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <input type="number" min={0} value={s.fileSkipRows} onChange={(e) => set({ fileSkipRows: Math.max(0, Number(e.target.value)) })} style={{ width: 56, height: 28, padding: "0 8px", borderRadius: 6, border: "1px solid var(--border-2)", background: "var(--surface)", fontFamily: "'Geist Mono',monospace", fontSize: 12 }} />

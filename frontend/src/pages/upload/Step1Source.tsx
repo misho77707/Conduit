@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { connectionsApi, databasesOnly, filesApi, type FileEntry } from "../../lib/api";
 import { useToast } from "../../lib/toast";
-import { fmtBytes, dbTile, statusBadge } from "../../lib/format";
+import { fmtBytes, dbTile, fileFormatLabel, statusBadge } from "../../lib/format";
 import { SUPPORTED_FILE_FORMATS } from "../../lib/constants";
 import { Icon } from "../../ui/Icon";
 import { Button } from "../../ui/Button";
@@ -118,7 +118,7 @@ function UploadTab({ s, set, onInspected }: { s: WizardState; set: (p: Partial<W
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 1, background: "var(--border)", border: "1px solid var(--border)", borderRadius: 6, overflow: "hidden" }}>
           <Stat label="Rows" value={s.fileInspect.row_estimate != null ? `${s.fileInspect.exact ? "" : "~"}${s.fileInspect.row_estimate.toLocaleString()}` : "unknown"} />
           <Stat label="Columns" value={String(s.fileInspect.columns.length)} />
-          <Stat label="Detected" value={s.fileInspect.format.toUpperCase()} />
+          <Stat label="Detected" value={fileFormatLabel(s.fileInspect.format, s.fileInspect.compression)} />
           <Stat label="Size" value={s.fileInspect.size_bytes != null ? fmtBytes(s.fileInspect.size_bytes) : "—"} />
         </div>
       )}
@@ -187,7 +187,7 @@ function ServerTab({ s, onPick }: { s: WizardState; onPick: (path: string, name:
           >
             <Icon name={f.is_dir ? "folder" : "description"} style={{ fontSize: 16, color: "var(--text-3)" }} />
             <span style={{ fontFamily: "'Geist Mono',monospace", fontSize: 12 }}>{f.name}</span>
-            <span style={{ fontSize: 12, color: "var(--text-2)" }}>{f.is_dir ? "" : f.format || "—"}</span>
+            <span style={{ fontSize: 12, color: "var(--text-2)" }}>{f.is_dir ? "" : f.format ? `${f.format}${f.compression ? ` · ${f.compression}` : ""}` : "—"}</span>
             <span style={{ fontFamily: "'Geist Mono',monospace", fontSize: 12, color: "var(--text-2)" }}>{f.is_dir || f.size_bytes == null ? "" : fmtBytes(f.size_bytes)}</span>
             <span style={{ fontSize: 12, color: "var(--text-3)" }}>{f.modified_at ? new Date(f.modified_at).toLocaleString() : ""}</span>
           </button>

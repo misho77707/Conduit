@@ -113,3 +113,9 @@ export function dbTile(type: string, dark: boolean): { tbg: string; tfg: string 
     tfg: `oklch(${dark ? 0.8 : 0.48} 0.13 ${h})`,
   };
 }
+
+/** "CSV", or "CSV · gzip" / "PARQUET · zip" for a compressed file. */
+export function fileFormatLabel(format: string | null | undefined, compression?: string | null): string {
+  const f = (format || "?").toUpperCase();
+  return compression ? `${f} · ${compression}` : f;
+}
