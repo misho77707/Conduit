@@ -12,6 +12,7 @@ from ..deps import current_user
 from ..engine import joblog
 from ..engine.arrowconv import _jsonable
 from ..engine.model import ReadRequest
+from ..engine import combined
 from ..engine.runner import JobError, prepare, short_error, snapshot
 from ..engine.schedule import ScheduleError, next_after, validate_cron
 from ..engine.sources import SourceUnavailable, raw_columns, source_adapter
@@ -39,7 +40,8 @@ def _out(p: Pipeline, last_job: Job | None) -> PipelineOut:
         last_run = PipelineLastRunOut(job_id=last_job.id, status=last_job.status, rows_written=last_job.rows_written,
                                       started_at=last_job.started_at, finished_at=last_job.finished_at, error=last_job.error)
     return PipelineOut(id=p.id, name=p.name, description=p.description, source=p.source, target=p.target,
-                       options=p.options, steps=p.steps, output_columns=p.output_columns, schedule=p.schedule,
+                       options=p.options, steps=p.steps, output_columns=p.output_columns, source_columns=p.source_columns,
+                       schedule=p.schedule,
                        enabled=p.enabled, next_run_at=p.next_run_at, created_at=p.created_at, updated_at=p.updated_at,
                        last_run=last_run, last_checked_at=p.last_checked_at, last_check_note=p.last_check_note)
 
@@ -108,6 +110,7 @@ def update_pipeline(pipeline_id: uuid.UUID, body: PipelinePatch, session: Sessio
         setattr(p, k, v)
     if schema_affecting:
         p.output_columns = None  # the cached schema no longer matches; /run needs a fresh preview first
+        p.source_columns = None
     if "schedule" in data or "enabled" in data:
         p.next_run_at = _next_run_for(p.schedule, p.enabled)
     try:
@@ -138,6 +141,14 @@ def _validate_shape(source: dict, target: dict, options: dict, steps: list) -> N
         raise HTTPException(422, "Pipelines read the whole source in one piece; a split column is not supported yet")
     if steps and s.is_file and o.strategy != "full":
         raise HTTPException(422, "Files are always loaded whole: use the 'full' strategy")
+    if s.combined is not None:
+        if o.strategy != "full" or o.split_column:
+            raise HTTPException(422, "A combined source is read as a whole: use the 'full' strategy without a split column "
+                                     "(an incremental run is the driver input's watermark)")
+        try:
+            combined.check(s.combined)
+        except combined.CombinedError as e:
+            raise HTTPException(422, str(e)) from e
     try:
         compile_steps(step_models)
     except StepError as e:
@@ -146,9 +157,12 @@ def _validate_shape(source: dict, target: dict, options: dict, steps: list) -> N
 
 def _check_connections(session: Session, source: dict, target: dict) -> None:
     """A table source and the target must be databases, not file storage (S3 / SFTP / HTTP)."""
-    for role, side in (("source", source), ("target", target)):
+    sides = [("source", source), ("target", target)]
+    if source.get("combined"):  # every table / query input, not the combined source itself
+        sides = [(f"input {i.get('alias')}", i.get("source") or {}) for i in source["combined"].get("inputs") or []] + sides[1:]
+    for role, side in sides:
         cid = side.get("connection_id")
-        if role == "source" and (side.get("file") or side.get("remote")):
+        if role != "target" and (side.get("file") or side.get("remote")):
             continue
         conn = session.get(Connection, uuid.UUID(str(cid))) if cid else None
         if conn is not None and category_of(conn.type) != "database":
@@ -165,6 +179,16 @@ def _rows_json(table: pa.Table, n: int) -> list[dict[str, Any]]:
 
 def _preview(session: Session, p: Pipeline, sample_rows: int, upto_step: str | None) -> dict[str, Any]:
     s = SourceIn(**p.source)
+    extra: dict[str, Any] = {}
+    if s.combined is not None:  # inputs staged with a row cap, the join SQL run over the sample
+        try:
+            cp = combined.preview(session, s.combined, sample_rows)
+        except combined.CombinedError as e:
+            raise HTTPException(422, str(e)) from e
+        except SourceUnavailable as e:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e)) from e
+        extra = {"combined": cp.info, "source_columns": [c.to_dict() for c in cp.columns]}
+        return _apply_steps_preview(p, cp.table, sample_rows, upto_step, extra)
     try:
         src = source_adapter(session, s)
         raw_cols = raw_columns(src, s)
@@ -192,7 +216,11 @@ def _preview(session: Session, p: Pipeline, sample_rows: int, upto_step: str | N
         table = first.table
     else:  # nothing to sample (empty table / no matching rows): still infer the shape from the raw schema
         table = pa.Table.from_arrays([pa.array([], type=to_arrow(c.logical)) for c in raw_cols], names=[c.name for c in raw_cols])
+    return _apply_steps_preview(p, table, sample_rows, upto_step, extra)
 
+
+def _apply_steps_preview(p: Pipeline, table: pa.Table, sample_rows: int, upto_step: str | None,
+                         extra: dict[str, Any]) -> dict[str, Any]:
     steps = compile_steps([StepIn(**sd) for sd in p.steps])
     if upto_step is not None:
         ids = [st.id for st in steps]
@@ -211,7 +239,7 @@ def _preview(session: Session, p: Pipeline, sample_rows: int, upto_step: str | N
     cols = infer_colspecs(table)
     full_chain = upto_step is None and error is None  # only a complete, clean run may refresh the cached schema
     return {"columns": [c.to_dict() for c in cols], "rows": _rows_json(table, sample_rows),
-            "sampled_rows": table.num_rows, "full_chain": full_chain, "error": error, "error_step": error_step}
+            "sampled_rows": table.num_rows, "full_chain": full_chain, "error": error, "error_step": error_step, **extra}
 
 
 @router.post("/{pipeline_id}/preview", dependencies=[Depends(current_user)])
@@ -221,6 +249,7 @@ async def preview_pipeline(pipeline_id: uuid.UUID, body: PipelinePreviewIn,
     result = await run_in_threadpool(_preview, session, p, body.sample_rows, body.upto_step)
     if result["full_chain"]:
         p.output_columns = result["columns"]
+        p.source_columns = result.get("source_columns")  # a combined source's join schema (None otherwise)
         session.commit()
     return PipelinePreviewOut(**result)
 
@@ -232,6 +261,7 @@ def _job_in(p: Pipeline) -> JobIn:
         name=p.name, source=SourceIn(**p.source), target=TargetIn(**p.target), columns=None,
         options=OptionsIn(**p.options), steps=[StepIn(**s) for s in p.steps],
         step_output_columns=[StepOutCol(**c) for c in p.output_columns] if p.output_columns else None,
+        source_columns=[StepOutCol(**c) for c in p.source_columns] if p.source_columns else None,
     )
 
 
@@ -239,7 +269,7 @@ def _launch(session: Session, p: Pipeline, user: User) -> Job:
     """Build and dispatch a Job for this pipeline. Raises JobError/StepError/ValueError-family exceptions on a
     bad pipeline (no HTTP awareness), so app.engine.schedule's beat-driven runs can call this too. `_dispatch`
     itself can still raise HTTPException (broker down) - that propagates unchanged to whichever caller."""
-    if not p.output_columns:
+    if not p.output_columns or ((p.source or {}).get("combined") and not p.source_columns):
         raise JobError("Refresh the preview before running this pipeline (no cached output schema yet)")
     body = _job_in(p)
     prepare(body, session)  # catch a bad table, column or step now instead of after queueing

@@ -185,6 +185,7 @@ class PipelineOut(BaseModel):
     options: dict[str, Any]
     steps: list[dict[str, Any]]
     output_columns: list[dict[str, Any]] | None
+    source_columns: list[dict[str, Any]] | None = None  # a combined source's join schema, from the last full preview
     schedule: str | None
     enabled: bool
     next_run_at: datetime | None = None
@@ -208,3 +209,6 @@ class PipelinePreviewOut(BaseModel):
     full_chain: bool  # whether this ran every step (and so refreshed the pipeline's cached output schema)
     error: str | None = None  # why a step failed; columns/rows are then the output of the step before it
     error_step: str | None = None  # id of the step that failed
+    # combined sources: per-input rows staged (capped?) and their columns, the join's row count, notes
+    combined: dict[str, Any] | None = None
+    source_columns: list[dict[str, Any]] | None = None  # the join SQL's exact output schema

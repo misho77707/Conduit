@@ -54,6 +54,7 @@ class StageInput:
     label: str = ""  # how messages name the input
     request: ReadRequest | None = None  # a prepared read (e.g. "rows above the watermark"); default: the whole source
     limit: int | None = None  # stop after this many rows (previews)
+    max_splits: int | None = None  # read only the first N splits (previews: a multi-file remote input's first file)
 
     @property
     def stored_names(self) -> list[str]:
@@ -109,7 +110,8 @@ def _read(inp: StageInput, con: duckdb.DuckDBPyConnection, counter: list[int], s
           guard: Callable[[StageInput], None] | None, capped: set[str]) -> None:
     schema = storage_schema(inp.columns, inp.stored_names)
     req = read_request(inp)
-    for split in inp.adapter.plan_splits(req, 1):
+    splits = inp.adapter.plan_splits(req, 1)
+    for split in splits[: inp.max_splits] if inp.max_splits else splits:
         gen = inp.adapter.read_batches(req, split, min(chunk, inp.limit) if inp.limit else chunk)
         try:
             for batch in gen:

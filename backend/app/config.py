@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     remote_cache_mb: int = 2_048  # previews / unpacked archives are cached up to this total, least recently used out
     remote_list_max: int = 100_000  # a pattern may scan at most this many entries under its folder
 
+    # Combined pipeline sources (several inputs joined by SQL)
+    combined_preview_rows: int = 100_000  # a preview stages at most this many rows per input
+    combined_lookup_max_rows: int = 5_000_000  # stream mode: a lookup input may not have more rows than this ...
+    combined_lookup_max_mb: int = 2_048  # ... or take more memory than this (use staged mode for bigger ones)
+    combined_min_free_gb: float = 5  # staging stops when the data folder's free space drops below this ...
+    combined_min_free_pct: float = 5  # ... or below this share of the disk, whichever is larger
+
     # Monitor
     monitor_disks: str = ""  # extra disks to show: "path[:label],path[:label]" (paths as seen inside the container)
     monitor_warn_pct: int = 85  # CPU / memory / disk level above which the monitor says "High"
@@ -65,6 +72,11 @@ class Settings(BaseSettings):
     def remote_dir(self) -> str:
         """Per-job downloads (remote/jobs/<job id>/) and the preview / unpack cache (remote/cache/)."""
         return f"{self.data_dir.rstrip('/')}/remote"
+
+    @property
+    def combined_dir(self) -> str:
+        """Scratch DuckDB files of combined pipeline jobs: combined/jobs/<job id>/scratch.duckdb."""
+        return f"{self.data_dir.rstrip('/')}/combined"
 
     @property
     def compare_dir(self) -> str:

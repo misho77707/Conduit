@@ -39,6 +39,7 @@ from .adapters import PartialWrite, get_adapter
 from .arrowconv import _jsonable
 from .ddl import TargetOptions, split_statements, suggest_partition
 from ..files import UnsupportedFormat
+from .combined import PlannedCombined
 from .filesource import FileAdapter, FileSpec, MultiFileAdapter
 from .model import ReadRequest, SplitSpec, dec, enc
 from .spec import ColumnMap, JobIn, parse_bound
@@ -239,8 +240,14 @@ class Prepared:
 
 
 def is_file_source(src: Any) -> bool:
-    """A local file or one or more (downloaded / previewed) remote files: read in one piece per file."""
-    return isinstance(src, (FileAdapter, MultiFileAdapter))
+    """A local file, one or more remote files, or a combined source: read in one piece per file / row range."""
+    return isinstance(src, (FileAdapter, MultiFileAdapter)) or getattr(src, "dialect", "") == "combined"
+
+
+def combined_job_source(session: Session, spec: JobIn, job_id: uuid.UUID) -> Any:
+    from .combined_run import job_source
+
+    return job_source(session, spec, job_id)
 
 
 def _conn(session: Session, cid: uuid.UUID | None, role: str) -> Connection:
@@ -265,6 +272,17 @@ def prepare(spec: JobIn, session: Session, job_id: uuid.UUID | None = None) -> P
         src: Any = FileAdapter(FileSpec(**s.file.model_dump()))
         read_cols, suggest = src.read_columns(), {c.name: c for c in src.suggest_columns()}
         src_key = f"file:{s.file.path}"
+    elif s.combined:
+        if o.strategy != "full" or o.split_column:
+            raise JobError("A combined source is read as a whole: use the 'full' strategy without a split column")
+        _conn(session, t.connection_id, "target")
+        if job_id is None:  # launching / validating: never stage here, plan with the cached join schema
+            src = PlannedCombined(spec.source_columns or [])
+        else:
+            src = combined_job_source(session, spec, job_id)
+        notes += src.notes
+        read_cols, suggest = src.read_columns(), {c.name: c for c in src.suggest_columns()}
+        src_key = "combined:" + hashlib.sha1(spec.source.combined.sql.encode()).hexdigest()[:12]
     elif s.remote:
         from .. import remote as rmt
 

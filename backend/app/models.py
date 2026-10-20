@@ -85,6 +85,7 @@ class Job(Base):
     workers: Mapped[int] = mapped_column(Integer, default=1)
 
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    phase: Mapped[str | None] = mapped_column(String(200), nullable=True)  # a combined job: staging … / joining / loading
     cancel_requested: Mapped[bool] = mapped_column(default=False)
     celery_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     owner_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
@@ -183,6 +184,9 @@ class Pipeline(Base):
     # nullable, source_name}, ...]); a run needs this to know what the "Load" step is writing. Cleared
     # whenever source/steps change, so a stale schema can never be run against.
     output_columns: Mapped[list | None] = mapped_column(JsonType, nullable=True)
+    # A combined source's own output (the join SQL's columns) from the last full preview: launching a run never
+    # stages the inputs, so this is what it plans with. Cleared together with output_columns.
+    source_columns: Mapped[list | None] = mapped_column(JsonType, nullable=True)
 
     schedule: Mapped[str | None] = mapped_column(String(120), nullable=True)  # cron expression (croniter syntax) or a
     # shortcut like "@daily"; validated on save

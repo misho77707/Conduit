@@ -7,6 +7,8 @@ import uuid
 import zoneinfo
 from typing import Any, Literal
 
+import re
+
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .types import clean, is_valid
@@ -76,6 +78,66 @@ class RemoteIn(ParseOptions):
         return self
 
 
+_ALIAS = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
+
+
+class CombinedInputIn(BaseModel):
+    """One input of a combined source: a name the SQL uses as a table, and where its rows come from."""
+
+    alias: str
+    source: "SourceIn"  # a table / query / file / remote file (never combined); its `where` is pushed down
+    columns: list[str] | None = None  # read only these columns (None = all), pushed down to the source
+
+    @field_validator("alias")
+    @classmethod
+    def _alias(cls, v: str) -> str:
+        if not _ALIAS.match(v or ""):
+            raise ValueError(f"Alias {v!r} must be a plain identifier (letters, digits, underscore; not starting with a digit)")
+        return v
+
+    @model_validator(mode="after")
+    def _not_nested(self) -> "CombinedInputIn":
+        if self.source.combined is not None:
+            raise ValueError(f"Input {self.alias!r} is itself combined: inputs must be tables, queries or files")
+        return self
+
+
+class CombinedWatermarkIn(BaseModel):
+    """Read only the driver's rows above the last saved value of `column` (the first run reads everything)."""
+
+    column: str = Field(min_length=1, max_length=200)
+    # Re-read this much below the saved watermark, for late-arriving rows (pair it with upsert): seconds for a
+    # date/time column, the column's own units for a number.
+    overlap: float = Field(0, ge=0)
+
+
+class CombinedIn(BaseModel):
+    """Several inputs joined by one DuckDB SELECT over their aliases (pipelines only)."""
+
+    inputs: list[CombinedInputIn] = Field(min_length=2, max_length=8)
+    sql: str = Field(min_length=1, max_length=100_000)
+    mode: Literal["staged", "stream"] = "staged"  # staged: copy all inputs, join once; stream: driver in batches
+    driver: str | None = None  # an alias: streamed in stream mode, and the input a watermark applies to
+    watermark: CombinedWatermarkIn | None = None
+
+    @model_validator(mode="after")
+    def _shape(self) -> "CombinedIn":
+        aliases = [i.alias for i in self.inputs]
+        dupes = sorted({a for a in aliases if [x.lower() for x in aliases].count(a.lower()) > 1})
+        if dupes:
+            raise ValueError(f"Each input needs its own alias ({', '.join(dupes)} is used twice)")
+        if self.driver is not None and self.driver not in aliases:
+            raise ValueError(f"The driver {self.driver!r} is not one of the inputs ({', '.join(aliases)})")
+        if self.mode == "stream" and self.driver is None:
+            raise ValueError("Stream mode needs a driver: the one big input that is streamed (the others are lookups)")
+        if self.watermark is not None and self.driver is None:
+            raise ValueError("A watermark needs a driver: the input whose new rows each run reads")
+        return self
+
+    def input(self, alias: str) -> CombinedInputIn:
+        return next(i for i in self.inputs if i.alias == alias)
+
+
 class SourceIn(BaseModel):
     connection_id: uuid.UUID | None = None
     table: str | None = None
@@ -83,24 +145,29 @@ class SourceIn(BaseModel):
     where: str = ""  # SQL condition (MongoDB: a JSON filter)
     file: FileIn | None = None
     remote: RemoteIn | None = None
+    combined: CombinedIn | None = None  # pipelines only: several inputs joined by SQL
 
     @model_validator(mode="after")
     def _one_source(self) -> "SourceIn":
-        given = [x for x in (self.table, self.query, self.file, self.remote) if x]
+        given = [x for x in (self.table, self.query, self.file, self.remote, self.combined) if x]
         if len(given) != 1:
-            raise ValueError("Give exactly one of: table, query, file, remote")
-        if self.file is None and self.remote is None and self.connection_id is None:
+            raise ValueError("Give exactly one of: table, query, file, remote, combined")
+        if self.file is None and self.remote is None and self.combined is None and self.connection_id is None:
             raise ValueError("connection_id is required for a table or query source")
         return self
 
     @property
     def kind(self) -> str:
-        return "file" if self.file else "remote" if self.remote else "query" if self.query else "table"
+        return ("file" if self.file else "remote" if self.remote else "combined" if self.combined
+                else "query" if self.query else "table")
 
     @property
     def is_file(self) -> bool:
         """A local or a remote file (read through the file adapter, never a database table)."""
         return self.file is not None or self.remote is not None
+
+
+CombinedInputIn.model_rebuild()  # it refers to SourceIn, defined after it
 
 
 class TargetIn(BaseModel):
@@ -176,12 +243,17 @@ class JobIn(BaseModel):
     options: OptionsIn = Field(default_factory=OptionsIn)
     # Pipeline transform chain (empty for an ordinary transfer / file load job).
     steps: list[StepIn] = Field(default_factory=list)
+    # A combined source's cached output schema (the join SQL's columns, from the pipeline's last full preview):
+    # a combined source can't be probed without staging its inputs, so launching a run never reads them.
+    source_columns: list[StepOutCol] | None = None
     # The step chain's cached output schema (from the pipeline's last preview); required when `steps` is
     # non-empty, since that is what `columns`-less identity mapping maps onto the target table.
     step_output_columns: list[StepOutCol] | None = None
 
     @model_validator(mode="after")
     def _steps_need_a_column_cache(self) -> "JobIn":
+        if self.source.combined is not None and not self.source_columns:
+            raise ValueError("This combined pipeline has no cached preview yet: refresh the preview before running it")
         if self.steps and not self.step_output_columns:
             raise ValueError("This pipeline has no cached preview yet: refresh the preview before running it")
         if self.steps and self.options.split_column:
