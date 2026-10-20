@@ -14,7 +14,6 @@ from __future__ import annotations
 import logging
 import re
 import shutil
-import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -23,16 +22,16 @@ from pathlib import Path
 from typing import Any
 
 import duckdb
-import pyarrow as pa
 from sqlalchemy import select
 
 from ..config import get_settings
 from ..db import get_sessionmaker
-from ..engine.model import ReadRequest
+from ..engine import staging
+from ..engine.staging import StageInput
 from ..engine.runner import JobError, short_error
 from ..engine.sources import raw_columns, source_adapter, source_connection
 from ..engine.spec import SourceIn
-from ..engine.types import ColSpec, to_arrow
+from ..engine.types import ColSpec
 from ..models import Comparison, utcnow
 from ..services import build_connector
 from .spec import ColumnPair, CompareIn
@@ -175,56 +174,7 @@ def resolve(session, spec: CompareIn, work: Path | None = None) -> Resolved:
 
 # ---- reading ---------------------------------------------------------------------------
 
-def _storage_schema(cols: list[ColSpec]) -> pa.Schema:
-    """Arrow schema the side is stored with: logical types, time-zone aware times as naive UTC."""
-    fields = []
-    for i, c in enumerate(cols):
-        t = to_arrow(c.logical)
-        if pa.types.is_timestamp(t) and t.tz:
-            t = pa.timestamp(t.unit)
-        fields.append(pa.field(f"c{i}", t))
-    return pa.schema(fields)
 
-
-def _to_storage(table: pa.Table, cols: list[ColSpec], schema: pa.Schema) -> pa.Table:
-    arrays = []
-    for i, c in enumerate(cols):
-        arr = table.column(c.name)
-        if pa.types.is_timestamp(arr.type) and arr.type.tz:
-            arr = arr.cast(pa.timestamp(arr.type.unit))  # the same instant, as UTC wall-clock time
-        arrays.append(arr)
-    t = pa.Table.from_arrays(arrays, names=schema.names)
-    try:
-        return t.cast(schema, safe=False)
-    except (pa.ArrowInvalid, pa.ArrowNotImplementedError, pa.ArrowTypeError):
-        return t  # let DuckDB cast on insert
-
-
-def _create_side(con: duckdb.DuckDBPyConnection, table: str, cols: list[ColSpec]) -> None:
-    con.register("empty_side", _storage_schema(cols).empty_table())
-    con.execute(f"CREATE TABLE {table} AS SELECT * FROM empty_side")
-    con.unregister("empty_side")
-
-
-def _read_side(adapter: Any, side: SourceIn, cols: list[ColSpec], table: str, con: duckdb.DuckDBPyConnection,
-               counter: list[int], stop: threading.Event, chunk: int) -> None:
-    schema = _storage_schema(cols)
-    req = ReadRequest(table=side.table, query=side.query, where=side.where, columns=cols, mode="full")
-    for split in adapter.plan_splits(req, 1):
-        gen = adapter.read_batches(req, split, chunk)
-        try:
-            for batch in gen:
-                if stop.is_set():
-                    raise Cancelled()
-                if batch.table.num_rows == 0:
-                    continue
-                part = _to_storage(batch.table, cols, schema)
-                con.register("batch", part)
-                con.execute(f"INSERT INTO {table} SELECT * FROM batch")
-                con.unregister("batch")
-                counter[0] += part.num_rows
-        finally:
-            gen.close()
 
 
 # ---- normalising the two sides to comparable types ---------------------------------------
@@ -459,43 +409,17 @@ def _execute(cid: uuid.UUID, spec: CompareIn, r: Resolved, work: Path) -> dict[s
     con = duckdb.connect(str(work_db))
     try:
         con.execute("SET preserve_insertion_order = false")
-        # both tables exist before the readers start, so the two threads only ever append
-        _create_side(con, "src", [p.source for p in r.pairs])
-        _create_side(con, "tgt", [p.target for p in r.pairs])
-        stop = threading.Event()
-        counts = {"source": [0], "target": [0]}
-        errors: list[BaseException] = []
-
-        def reader(role: str) -> None:
-            adapter = r.src if role == "source" else r.tgt
-            side = spec.source if role == "source" else spec.target
-            cols = [p.source if role == "source" else p.target for p in r.pairs]
-            cur = con.cursor()
-            try:
-                _read_side(adapter, side, cols, "src" if role == "source" else "tgt", cur, counts[role], stop, spec.options.read_chunk)
-            except Cancelled:
-                pass
-            except BaseException as e:  # noqa: BLE001 - surfaced by the main thread
-                errors.append(JobError(f"Reading the {role} failed: {short_error(e)}"))
-                stop.set()
-            finally:
-                cur.close()
-
-        threads = [threading.Thread(target=reader, args=(role,), daemon=True, name=f"cmp-{role}") for role in ("source", "target")]
-        for th in threads:
-            th.start()
-        while any(th.is_alive() for th in threads):
-            for th in threads:
-                th.join(timeout=1.0)
-            if _update(cid, rows_source=counts["source"][0], rows_target=counts["target"][0], heartbeat_at=utcnow(),
-                       phase="Reading both sides"):
-                stop.set()
-        if errors:
-            raise errors[0]
-        if stop.is_set():
-            raise Cancelled()
-        if _update(cid, rows_source=counts["source"][0], rows_target=counts["target"][0], heartbeat_at=utcnow(),
-                   phase="Comparing"):
+        names = [f"c{p.i}" for p in r.pairs]  # pair i is c<i> on both sides: the SQL never quotes user names
+        inputs = [StageInput("src", r.src, spec.source, [p.source for p in r.pairs], names, "the source"),
+                  StageInput("tgt", r.tgt, spec.target, [p.target for p in r.pairs], names, "the target")]
+        try:
+            res = staging.stage(con, inputs, chunk=spec.options.read_chunk, tick=lambda n: _update(
+                cid, rows_source=n["src"], rows_target=n["tgt"], heartbeat_at=utcnow(), phase="Reading both sides"))
+        except staging.StagingCancelled as e:
+            raise Cancelled() from e
+        except staging.StagingError as e:
+            raise JobError(str(e)) from e
+        if _update(cid, rows_source=res.rows["src"], rows_target=res.rows["tgt"], heartbeat_at=utcnow(), phase="Comparing"):
             raise Cancelled()
         con.execute(f"ATTACH {_lit(str(res_db))} AS res")
         summary = _diff(con, r, spec)
