@@ -6,7 +6,7 @@ import sqlite3
 import duckdb
 import pytest
 
-from jobhelpers import add_conn, uniq, wait_job
+from jobhelpers import add_ch, add_conn, add_pg, needs_ch, needs_pg, pg_run, uniq, wait_job
 
 
 @pytest.fixture()
@@ -282,6 +282,102 @@ def test_disk_floor(client, auth, world, monkeypatch):
     monkeypatch.setattr("app.engine.combined_run.time.monotonic", lambda: calls[0] * 10.0)
     j = run_pipeline(client, auth, pid)
     assert j["status"] == "failed" and "Stopped staging" in j["error"], j
+
+
+# ---- stream mode ----------------------------------------------------------------------------------------
+
+def test_stream_mode_with_a_lookup(client, auth, world):
+    src = combined(world, JOIN, mode="stream", driver="events")
+    pid = ready(client, auth, world, src, table="streamed", options={"read_chunk": 100})
+    j = run_pipeline(client, auth, pid)
+    assert j["status"] == "succeeded" and j["rows_written"] == 30, j
+    assert dst_rows(world, "select count(*), count(name) from streamed") == [(30, 24)]
+    log = log_of(client, auth, j["id"])
+    assert "lookup users: 4 rows in memory" in log and "staged events" not in log  # the driver is never copied
+    detail = client.get(f"/api/jobs/{j['id']}", headers=auth).json()
+    assert any("A Retry of a stream-mode run restarts the driver" in n for n in detail["plan"]["notes"])
+
+
+def test_stream_mode_watermark(client, auth, world):
+    src = combined(world, JOIN, mode="stream", driver="events", watermark={"column": "id"})
+    pid = ready(client, auth, world, src, table="sw")
+    assert run_pipeline(client, auth, pid)["rows_written"] == 30
+    _add_events(world, [(50, 3, 5.0, "2026-10-05 10:00:00")])
+    j = run_pipeline(client, auth, pid)
+    assert j["status"] == "succeeded" and j["rows_written"] == 1, j
+    assert dst_rows(world, "select id, name from sw where id = 50") == [(50, "cy")]
+
+
+def test_a_lookup_over_the_cap_fails_early(client, auth, world, monkeypatch):
+    from app.config import get_settings
+
+    pid = ready(client, auth, world, combined(world, JOIN, mode="stream", driver="events"), table="cap")
+    monkeypatch.setenv("CONDUIT_COMBINED_LOOKUP_MAX_ROWS", "3")  # users has 4 rows
+    get_settings.cache_clear()
+    j = run_pipeline(client, auth, pid)
+    assert j["status"] == "failed" and "Lookup users has more than 3 rows" in j["error"] and "staged mode" in j["error"], j
+    assert j["rows_written"] == 0
+
+
+def test_mongodb_input_with_a_csv_lookup(client, auth, world, monkeypatch):
+    mongomock = pytest.importorskip("mongomock")
+    shared = mongomock.MongoClient()
+    shared.close = lambda: None
+    import app.connectors.mongo as cm
+
+    monkeypatch.setattr(cm, "MongoClient", lambda *a, **k: shared)
+    shared.shop.orders.insert_many([{"order": i, "country": c, "total": i * 10} for i, c in enumerate(["GE", "AM", "TR", "GE"], 1)])
+    mg = add_conn(client, auth, "mongodb", uniq("mg"), {"database": "shop"}, {"uri": "mongodb://localhost:27017/shop"})
+    src = combined(world, "SELECT o.order, o.total, r.region FROM orders o JOIN regions r ON r.country = o.country", inputs=[
+        {"alias": "orders", "source": {"connection_id": mg, "table": "orders"}, "columns": ["order", "country", "total"]},
+        {"alias": "regions", "source": {"file": {"path": str(world["env"] / "regions.csv")}}}])
+    pid = ready(client, auth, world, src, table="by_region")
+    j = run_pipeline(client, auth, pid)
+    assert j["status"] == "succeeded" and j["rows_written"] == 4, j
+    assert dst_rows(world, "select region, count(*) from by_region group by region order by region") == [("anatolia", 1), ("caucasus", 3)]
+
+
+@needs_pg
+@needs_ch
+def test_live_clickhouse_events_with_a_postgres_dimension(client, auth):
+    """ClickHouse events + a Postgres dimension into a Postgres target, both modes, then a daily GROUP BY."""
+    from app.connectors import get_connector
+    from jobhelpers import CH
+
+    ev, dim, out = uniq("ev"), uniq("dim"), uniq("out")
+    chc = get_connector("clickhouse", CH, {})._client()
+    try:
+        chc.command(f"CREATE TABLE conduit.{ev} (id UInt64, user_id UInt32, amount Decimal(12,2), at DateTime64(3)) "
+                    "ENGINE = MergeTree ORDER BY id")
+        chc.command(f"INSERT INTO conduit.{ev} SELECT number + 1, number % 50 + 1, number / 4, "
+                    "toDateTime64('2026-10-01 00:00:00', 3) + number * 60 FROM numbers(5000)")
+        pg_run(f"create table {dim}(id integer primary key, name text, country text)")
+        pg_run(f"insert into {dim} select g, 'u' || g, case when g % 2 = 0 then 'GE' else 'AM' end from generate_series(1, 40) g")
+        pg, ch = add_pg(client, auth), add_ch(client, auth)
+        inputs = [{"alias": "events", "source": {"connection_id": ch, "table": f"conduit.{ev}"}},
+                  {"alias": "users", "source": {"connection_id": pg, "table": f"public.{dim}"}}]
+        sql = "SELECT e.id, e.amount, e.at, u.name, u.country FROM events e LEFT JOIN users u ON u.id = e.user_id"
+        for mode, table in (("staged", f"public.{out}_s"), ("stream", f"public.{out}_t")):
+            r = client.post("/api/pipelines", json={"name": uniq("p"), "target": {"connection_id": pg, "table": table},
+                                                    "source": {"combined": {"inputs": inputs, "sql": sql, "mode": mode, "driver": "events"}}},
+                            headers=auth)
+            pid = r.json()["id"]
+            assert client.post(f"/api/pipelines/{pid}/preview", json={"sample_rows": 5}, headers=auth).status_code == 200
+            j = run_pipeline(client, auth, pid, timeout=180)
+            assert j["status"] == "succeeded" and j["rows_written"] == 5000, (mode, j)
+            assert pg_run(f"select count(*), count(name) from {table}") == [(5000, 4000)]  # users 41-50 are missing
+        daily = ("SELECT CAST(e.at AS DATE) AS day, u.country, count(*) AS n, sum(e.amount) AS total FROM events e "
+                 "JOIN users u ON u.id = e.user_id GROUP BY ALL")
+        r = client.post("/api/pipelines", json={"name": uniq("p"), "target": {"connection_id": pg, "table": f"public.{out}_d"},
+                                                "source": {"combined": {"inputs": inputs, "sql": daily}}}, headers=auth)
+        pid = r.json()["id"]
+        assert client.post(f"/api/pipelines/{pid}/preview", json={"sample_rows": 5}, headers=auth).status_code == 200
+        j = run_pipeline(client, auth, pid, timeout=180)
+        assert j["status"] == "succeeded", j
+        assert pg_run(f"select sum(n) from public.{out}_d") == [(4000,)]
+    finally:
+        chc.command(f"DROP TABLE IF EXISTS conduit.{ev}")
+        chc.close()
 
 
 def test_the_scheduler_runs_a_combined_pipeline(client, auth, world):

@@ -754,6 +754,8 @@ def _finish(job_id: uuid.UUID, status: str, error: str | None, ctx: Ctx | None, 
         s.commit()
     if ctx:
         ctx.sink.close()
+        if hasattr(ctx.prep.src, "close"):
+            ctx.prep.src.close()  # e.g. a stream-mode combined source's in-memory lookups
     if status == "succeeded":  # downloads / scratch files are only kept for a Retry of a failed / cancelled job
         from ..remote import remove_job_dir
         from .combined_run import remove_job_dir as remove_combined_dir
