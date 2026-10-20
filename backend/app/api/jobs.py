@@ -20,6 +20,7 @@ from ..connectors.base import UserFacingError
 from ..engine.steps import StepError
 from ..remote import display as remote_display
 from ..remote import remove_job_dir
+from ..engine.combined_run import remove_job_dir as remove_combined_dir
 from ..models import Job, JobSplit, User, utcnow
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -171,6 +172,7 @@ def delete_job(job_id: uuid.UUID, session: Session = Depends(get_session)) -> No
         raise HTTPException(409, "Cancel the job before deleting it")
     rejects_path(job.id).unlink(missing_ok=True)
     remove_job_dir(job.id)
+    remove_combined_dir(job.id)
     joblog.clear(job.id)
     session.delete(job)
     session.commit()

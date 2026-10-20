@@ -747,13 +747,32 @@ def _finish(job_id: uuid.UUID, status: str, error: str | None, ctx: Ctx | None, 
             job.rate_rows_s = rate
         if status == "succeeded" and ctx and job.spec.get("options", {}).get("strategy") == "watermark":
             _save_watermark(s, job, ctx)
+        if status == "succeeded" and ctx and hasattr(ctx.prep.src, "finish"):
+            ctx.prep.src.finish(s, job)  # e.g. a combined source's new watermark
+        if (job.spec.get("source") or {}).get("combined"):
+            job.phase = status
         s.commit()
     if ctx:
         ctx.sink.close()
-    if status == "succeeded":  # downloads are only kept for a Retry of a failed / cancelled job
+    if status == "succeeded":  # downloads / scratch files are only kept for a Retry of a failed / cancelled job
         from ..remote import remove_job_dir
+        from .combined_run import remove_job_dir as remove_combined_dir
         remove_job_dir(job_id)
+        remove_combined_dir(job_id)
     prune_finished()
+
+
+def _same_pipeline_running(s: Session, job: Job) -> Job | None:
+    """Another queued / running job of the same pipeline (a running one always wins; else the older one)."""
+    for other in s.scalars(select(Job).where(Job.pipeline_id == job.pipeline_id, Job.id != job.id,
+                                             Job.status.in_(("queued", "planning", "running")))):
+        hb = _aware(other.heartbeat_at)
+        fresh = hb is not None and (utcnow() - hb).total_seconds() < 90
+        if other.status in ("running", "planning") and fresh:
+            return other
+        if other.status == "queued" and (other.created_at, str(other.id)) < (job.created_at, str(job.id)):
+            return other
+    return None
 
 
 def _save_watermark(s: Session, job: Job, ctx: Ctx) -> None:
@@ -813,7 +832,11 @@ def run_job(job_id: uuid.UUID | str) -> str:
         hb = _aware(job.heartbeat_at)
         if job.status in ("planning", "running") and hb and (utcnow() - hb).total_seconds() < 45:
             return "already-running"  # a redelivered task while the first copy is still alive
-        job.status, job.error, job.heartbeat_at = "planning", None, utcnow()
+        combined_src = (job.spec.get("source") or {}).get("combined")
+        # A combined source stages its inputs while "preparing", which can take hours: show it as running (with a
+        # phase), so a worker that dies meanwhile turns the job stalled - and retryable - instead of stuck planning.
+        job.status, job.error, job.heartbeat_at = ("running" if combined_src else "planning"), None, utcnow()
+        job.phase = "staging" if combined_src and not job.splits else job.phase
         job.started_at = job.started_at or utcnow()
         job.finished_at = None
         s.commit()
@@ -827,6 +850,10 @@ def run_job(job_id: uuid.UUID | str) -> str:
                     if other := overlapping_job(s, job.spec, job):
                         raise JobError(f"Another job ({other.name}, {other.status}) is loading from this source into this "
                                        "target: two loads with 'skip files already loaded' would load the same new files twice.")
+                if spec.source.combined is not None and spec.source.combined.watermark and job.pipeline_id:
+                    if other := _same_pipeline_running(s, job):
+                        raise JobError(f"Another run of this pipeline ({other.status}) is still going: two runs with a "
+                                       "watermark would read the same new rows twice.")
                 prep = prepare(spec, s, job_id=jid)
                 if first_run:
                     joblog.push(jid, "info", "planning")
@@ -846,7 +873,14 @@ def run_job(job_id: uuid.UUID | str) -> str:
                     s.commit()
         except Exception as e:  # noqa: BLE001
             from ..remote import NothingToLoad
+            from .staging import StagingCancelled
 
+            if isinstance(e, StagingCancelled):  # cancelled while staging a combined source
+                job.status, job.finished_at, job.phase = "cancelled", utcnow(), "cancelled while staging"
+                s.commit()
+                joblog.push(jid, "warn", "job cancelled while staging")
+                prune_finished()
+                return "cancelled"
             if isinstance(e, NothingToLoad):  # every matching remote file is already loaded: a 0-row success
                 job.status, job.finished_at, job.splits_total = "succeeded", utcnow(), 0
                 job.rows_read = job.rows_written = job.rows_rejected = 0
@@ -925,10 +959,12 @@ def prune_finished() -> None:
         old = list(s.scalars(select(Job).where(Job.status.in_(("succeeded", "failed", "cancelled")))
                              .order_by(Job.finished_at.desc().nullslast(), Job.created_at.desc()).offset(keep)))
         from ..remote import remove_job_dir
+        from .combined_run import remove_job_dir as remove_combined_dir
 
         for j in old:
             rejects_path(j.id).unlink(missing_ok=True)
             remove_job_dir(j.id)
+            remove_combined_dir(j.id)
             joblog.clear(j.id)
             s.execute(delete(JobSplit).where(JobSplit.job_id == j.id))
             s.delete(j)
@@ -964,4 +1000,5 @@ def snapshot(job: Job, splits: list[JobSplit] | None = None) -> dict[str, Any]:
         "splits_total": job.splits_total, "splits_done": done, "error": job.error,
         "created_at": job.created_at, "started_at": job.started_at, "finished_at": job.finished_at,
         "has_rejects": rejects_path(job.id).exists() and rejects_path(job.id).stat().st_size > 0,
+        "phase": job.phase,  # a combined source: staging … / joining / loading
     }

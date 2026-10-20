@@ -1,7 +1,7 @@
 """Combined sources (pipelines only): several inputs joined by one DuckDB SELECT. File databases stand in for the
 different servers: SQLite (events), DuckDB (users), a CSV file (regions); no external services."""
 import sqlite3
-import time
+
 
 import duckdb
 import pytest
@@ -154,5 +154,150 @@ def test_editing_the_source_clears_the_cached_schemas(client, auth, world):
     assert p["output_columns"] is None and p["source_columns"] is None
 
 
-def _unused(*a):  # keep imports used by later phases
-    return time, wait_job
+# ---- staged runs ---------------------------------------------------------------------------------------
+
+def run_pipeline(client, auth, pid, timeout=60):
+    r = client.post(f"/api/pipelines/{pid}/run", headers=auth)
+    assert r.status_code in (200, 201), r.text
+    return wait_job(client, auth, r.json()["id"], timeout)
+
+
+def ready(client, auth, w, source, **kw):
+    r = pipeline(client, auth, w, source, **kw)
+    assert r.status_code == 201, r.text
+    pid = r.json()["id"]
+    pv = client.post(f"/api/pipelines/{pid}/preview", json={"sample_rows": 5}, headers=auth)
+    assert pv.status_code == 200, pv.text
+    return pid
+
+
+def dst_rows(w, sql):
+    c = sqlite3.connect(w["env"] / "dst.sqlite")
+    try:
+        return c.execute(sql).fetchall()
+    finally:
+        c.close()
+
+
+def log_of(client, auth, job_id):
+    return " | ".join(x["msg"] for x in client.get(f"/api/jobs/{job_id}", headers=auth).json()["log"])
+
+
+def test_staged_left_join_and_group_by_into_sqlite(client, auth, world):
+    pid = ready(client, auth, world, combined(world, JOIN), table="joined")
+    j = run_pipeline(client, auth, pid)
+    assert j["status"] == "succeeded" and j["rows_written"] == 30 and j["rows_total_exact"], j
+    assert dst_rows(world, "select count(*), count(name) from joined") == [(30, 24)]  # user 5 has no row: LEFT JOIN keeps 6
+    detail = client.get(f"/api/jobs/{j['id']}", headers=auth).json()
+    assert detail["phase"] == "succeeded" and any("events 30 rows" in n for n in detail["plan"]["notes"]), detail["plan"]
+    assert "staged events: 30 rows" in log_of(client, auth, j["id"])
+    from app.engine.combined_run import job_dir
+    assert not job_dir(j["id"]).exists()  # the scratch file is gone once the job succeeded
+    agg = ("SELECT u.country, count(*) AS n, sum(e.amount) AS total FROM events e JOIN users u ON u.id = e.user_id "
+           "GROUP BY u.country ORDER BY u.country")
+    pid = ready(client, auth, world, combined(world, agg), table="by_country")
+    j = run_pipeline(client, auth, pid)
+    assert j["status"] == "succeeded" and j["rows_written"] == 3, j
+    assert dst_rows(world, "select country, n from by_country order by country") == [("AM", 6), ("GE", 12), ("TR", 6)]
+
+
+def _add_events(w, rows):
+    c = sqlite3.connect(w["env"] / "events.sqlite")
+    c.executemany("insert into events values (?,?,?,?)", rows)
+    c.commit()
+    c.close()
+
+
+def test_watermark_reads_only_new_driver_rows_and_sees_lookup_changes(client, auth, world):
+    src = combined(world, JOIN, driver="events", watermark={"column": "id"})
+    pid = ready(client, auth, world, src, table="wm")
+    j = run_pipeline(client, auth, pid)
+    assert j["rows_written"] == 30 and "watermark: first run" in log_of(client, auth, j["id"]), j
+    _add_events(world, [(31, 1, 1.0, "2026-10-04 10:00:00"), (32, 2, 2.0, "2026-10-04 11:00:00")])
+    d = duckdb.connect(str(world["env"] / "users.duckdb"))
+    d.execute("update users set name = 'ANN' where id = 1")
+    d.close()
+    j = run_pipeline(client, auth, pid)
+    assert j["status"] == "succeeded" and j["rows_written"] == 2, j
+    assert "rows with id > 30" in log_of(client, auth, j["id"])
+    assert dst_rows(world, "select id, name from wm where id > 30 order by id") == [(31, "ANN"), (32, "bob")]
+    j = run_pipeline(client, auth, pid)  # nothing new: 0 rows, the watermark stays
+    assert j["status"] == "succeeded" and j["rows_written"] == 0, j
+
+
+def test_overlap_with_upsert(client, auth, world):
+    sql = "SELECT e.id, e.ts, u.name FROM events e LEFT JOIN users u ON u.id = e.user_id"
+    src = combined(world, sql, driver="events", watermark={"column": "ts", "overlap": 3600})
+    pid = ready(client, auth, world, src, table="ov", target={"mode": "upsert", "keys": ["id"]})
+    assert run_pipeline(client, auth, pid)["rows_written"] == 30
+    # the newest ts loaded is 2026-10-03 10:29; a row arrives late with 10:10 - below the watermark, within the hour
+    _add_events(world, [(40, 1, 1.0, "2026-10-03 10:10:00")])
+    j = run_pipeline(client, auth, pid)
+    # re-read: everything after 09:29 on the 3rd = the 10 rows of that day + the late one
+    assert j["status"] == "succeeded" and j["rows_written"] == 11, j
+    assert dst_rows(world, "select count(*), count(distinct id) from ov") == [(31, 31)]  # upsert: no duplicates
+    assert dst_rows(world, "select count(*) from ov where id = 40") == [(1,)]
+
+
+def test_retry_after_a_load_failure_reuses_the_scratch_file(client, auth, world, monkeypatch):
+    from app.engine import combined_run
+
+    staged = []
+    real_stage, real_read = combined_run._stage_and_join, combined_run.StagedResult.read_batches
+    monkeypatch.setattr(combined_run, "_stage_and_join", lambda *a, **k: staged.append(1) or real_stage(*a, **k))
+    broken = [True]
+
+    def flaky(self, req, split, batch_rows):
+        if broken[0]:
+            broken[0] = False
+            raise RuntimeError("target went away")
+        yield from real_read(self, req, split, batch_rows)
+
+    monkeypatch.setattr(combined_run.StagedResult, "read_batches", flaky)
+    pid = ready(client, auth, world, combined(world, JOIN), table="rt", options={"retries": 0})
+    j = run_pipeline(client, auth, pid)
+    assert j["status"] == "failed" and "target went away" in j["error"], j
+    assert combined_run.job_dir(j["id"]).joinpath("state.json").exists()
+    assert client.post(f"/api/jobs/{j['id']}/retry", headers=auth).status_code == 200
+    j = wait_job(client, auth, j["id"])
+    assert j["status"] == "succeeded" and j["rows_written"] == 30, j
+    assert staged == [1]  # staged once: the retry only loaded
+    assert "reusing the staged inputs" in log_of(client, auth, j["id"])
+
+
+def test_disk_floor(client, auth, world, monkeypatch):
+    from app.engine import combined_run
+
+    pid = ready(client, auth, world, combined(world, JOIN), table="disk")
+    monkeypatch.setattr(combined_run, "_floor_bytes", lambda p: (1, 5 * 1024 ** 3, 10 * 1024 ** 3))
+    j = run_pipeline(client, auth, pid)
+    assert j["status"] == "failed" and "Stopped before staging" in j["error"] and "floor" in j["error"], j
+    calls = [0]
+
+    def drops(p):  # enough space to start, then the disk fills up while staging
+        calls[0] += 1
+        return (100 * 1024 ** 3 if calls[0] == 1 else 1, 5 * 1024 ** 3, 200 * 1024 ** 3)
+
+    monkeypatch.setattr(combined_run, "_floor_bytes", drops)
+    monkeypatch.setattr("app.engine.combined_run.time.monotonic", lambda: calls[0] * 10.0)
+    j = run_pipeline(client, auth, pid)
+    assert j["status"] == "failed" and "Stopped staging" in j["error"], j
+
+
+def test_the_scheduler_runs_a_combined_pipeline(client, auth, world):
+    import uuid as _uuid
+    from datetime import timedelta
+
+    from app.db import get_sessionmaker
+    from app.engine.schedule import run_due
+    from app.models import Pipeline, utcnow
+
+    pid = ready(client, auth, world, combined(world, JOIN), table="sched")
+    client.patch(f"/api/pipelines/{pid}", json={"schedule": "* * * * *", "enabled": True}, headers=auth)
+    with get_sessionmaker()() as s:
+        s.get(Pipeline, _uuid.UUID(pid)).next_run_at = utcnow() - timedelta(minutes=1)
+        s.commit()
+    assert run_due() == 1
+    p = client.get(f"/api/pipelines/{pid}", headers=auth).json()
+    j = wait_job(client, auth, p["last_run"]["job_id"])
+    assert j["status"] == "succeeded" and j["rows_written"] == 30, j

@@ -265,6 +265,14 @@ def _job_in(p: Pipeline) -> JobIn:
     )
 
 
+def _source_conn(s: SourceIn) -> uuid.UUID | None:
+    """The job's source connection: a combined source's driver input (else its first database input)."""
+    if s.combined is None:
+        return s.connection_id
+    ordered = sorted(s.combined.inputs, key=lambda i: i.alias != s.combined.driver)
+    return next((i.source.connection_id for i in ordered if i.source.connection_id), None)
+
+
 def _launch(session: Session, p: Pipeline, user: User) -> Job:
     """Build and dispatch a Job for this pipeline. Raises JobError/StepError/ValueError-family exceptions on a
     bad pipeline (no HTTP awareness), so app.engine.schedule's beat-driven runs can call this too. `_dispatch`
@@ -273,7 +281,7 @@ def _launch(session: Session, p: Pipeline, user: User) -> Job:
         raise JobError("Refresh the preview before running this pipeline (no cached output schema yet)")
     body = _job_in(p)
     prepare(body, session)  # catch a bad table, column or step now instead of after queueing
-    job = Job(name=p.name, kind="pipeline", spec=body.model_dump(mode="json"), source_conn_id=body.source.connection_id,
+    job = Job(name=p.name, kind="pipeline", spec=body.model_dump(mode="json"), source_conn_id=_source_conn(body.source),
              target_conn_id=body.target.connection_id, workers=body.options.workers, owner_id=user.id, pipeline_id=p.id)
     session.add(job)
     session.commit()
