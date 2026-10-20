@@ -263,13 +263,13 @@ def preview(session: Session, c: CombinedIn, sample_rows: int) -> CombinedPrevie
                          f"{c.watermark.column} watermark.")
         if c.mode == "stream":
             notes.append(f"Stream mode runs this SQL once per batch of {c.driver}; the preview ran it once over the sample.")
-        notes += mismatches
         info = {
             "mode": c.mode,
             "inputs": [{"alias": i.alias, "rows": res.rows[i.alias], "capped": i.alias in res.capped,
                         "columns": [{"name": col.name, "type": col.logical} for col in s.columns]}
                        for i, s in zip(c.inputs, inputs)],
             "join_rows": join_rows, "notes": notes,
+            "key_mismatches": mismatches,  # join conditions over columns of different kinds (number = text, ...)
         }
         return CombinedPreview(table, cols, info)
     finally:

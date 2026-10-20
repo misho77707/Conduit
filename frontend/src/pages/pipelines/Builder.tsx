@@ -14,6 +14,8 @@ import { SourceEditor, TargetEditor } from "./SourceTargetEditor";
 import { StepEditor } from "./StepEditor";
 import { remoteLabel } from "../remote/RemotePicker";
 import { ScheduleModal } from "./ScheduleModal";
+import { CombinedEditor, CombinedPreviewStrip } from "./CombinedEditor";
+import { sourceProblem } from "./combined";
 
 interface Draft {
   name: string; description: string; source: SourceIn; target: TargetIn; options: OptionsIn; steps: StepIn[];
@@ -67,6 +69,8 @@ export function Builder() {
     const myReq = ++reqId.current;
     const t = setTimeout(async () => {
       if (!draft.name.trim() || !draft.target.connection_id || !draft.target.table.trim()) return;
+      const problem = sourceProblem(draft.source); // e.g. a combined input without a table yet: not saveable
+      if (problem) { setSaveError(problem); return; }
       setPreviewLoading(true);
       setSaveError(null);
       setPreviewError(null);
@@ -199,7 +203,7 @@ export function Builder() {
         {/* Steps sidebar */}
         <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: 12, display: "flex", flexDirection: "column" }}>
           <div style={{ fontSize: 11, fontWeight: 500, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.04em", padding: "0 4px 10px" }}>Steps</div>
-          <SidebarItem icon="input" title="Read source" sub={draft.source.remote ? remoteLabel(draft.source.remote, conns) || "no file yet" : draft.source.file ? draft.source.file.path || "no path yet" : draft.source.table || draft.source.query || "no source yet"} mode="Source"
+          <SidebarItem icon={draft.source.combined ? "join_inner" : "input"} title="Read source" sub={draft.source.combined ? `${draft.source.combined.inputs.map((i) => i.alias).join(" + ")} · ${draft.source.combined.mode}` : draft.source.remote ? remoteLabel(draft.source.remote, conns) || "no file yet" : draft.source.file ? draft.source.file.path || "no path yet" : draft.source.table || draft.source.query || "no source yet"} mode={draft.source.combined ? "Combined" : "Source"}
             active={selected === "source"} onClick={() => setSelected("source")} />
           {draft.steps.map((s) => (
             <SidebarItem key={s.id} icon={STEP_META[s.kind].icon} title={STEP_META[s.kind].label} sub={stepSummary(s)} mode={STEP_META[s.kind].group === "code" ? s.kind.toUpperCase() : "Visual"}
@@ -236,7 +240,10 @@ export function Builder() {
           {selected === "source" && (
             <>
               <PanelHeader icon="input" title="Read source" mode="Source" />
-              <div style={{ padding: 14 }}><SourceEditor value={draft.source} onChange={(v) => setDraft({ ...draft, source: v })} conns={conns} /></div>
+              <div style={{ padding: 14 }}>
+                <SourceEditor value={draft.source} onChange={(v) => setDraft((d) => (d ? { ...d, source: v } : d))} conns={conns}
+                  combined={(c, set) => <CombinedEditor value={c} onChange={set} conns={conns} info={preview?.combined ?? null} targetMode={draft.target.mode} />} />
+              </div>
             </>
           )}
           {selected === "target" && (
@@ -261,7 +268,7 @@ export function Builder() {
           <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 14px", borderBottom: `1px solid ${incomplete ? "var(--err)" : "var(--border)"}`, flexWrap: "wrap" }}>
             <span style={{ fontWeight: 600 }}>Preview</span>
             <span style={{ fontSize: 12, color: incomplete ? "var(--err)" : "var(--text-3)" }}>
-              {previewError ? "last good result" : preview?.error ? `stopped before step ${stepNo(preview.error_step)}` : selected === "target" ? "final output" : selected === "source" ? "source columns" : "after this step"}
+              {previewError ? "last good result" : preview?.error ? `stopped before step ${stepNo(preview.error_step)}` : selected === "target" ? "final output" : selected === "source" ? (draft.source.combined ? "join result" : "source columns") : "after this step"}
             </span>
             <div style={{ flex: 1 }} />
             {previewLoading && <Icon name="progress_activity" spin style={{ fontSize: 16, color: "var(--text-3)" }} />}
@@ -274,6 +281,7 @@ export function Builder() {
               onClick={!previewError && preview?.error_step ? () => setSelected(preview.error_step!) : undefined}
             />
           )}
+          {preview?.combined && draft.source.combined && <CombinedPreviewStrip info={preview.combined} />}
           {preview && (
             <div style={{ overflow: "auto", maxHeight: 560, opacity: previewError ? 0.55 : 1 }}>
               <table style={{ borderCollapse: "separate", borderSpacing: 0, fontSize: 12, minWidth: "100%" }}>

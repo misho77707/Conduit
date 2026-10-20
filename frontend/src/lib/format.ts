@@ -119,3 +119,8 @@ export function fileFormatLabel(format: string | null | undefined, compression?:
   const f = (format || "?").toUpperCase();
   return compression ? `${f} · ${compression}` : f;
 }
+
+/** A combined source's work before any row loads ("staging events 1,200 / ~5,000 · users 4", "joining"), else null. */
+export function prePhase(phase: string | null | undefined): string | null {
+  return phase && /^(staging|joining|loading lookups)/.test(phase) ? phase : null;
+}

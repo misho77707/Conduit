@@ -2,7 +2,7 @@
 // (df is a DataFrame, df["x"] a Series, df["x"].str the string accessor, `out = df.copy()` a DataFrame ...).
 // No language server: everything is worked out from the text before the caret.
 
-export type Kind = "method" | "property" | "function" | "column" | "keyword" | "module" | "variable" | "constant";
+export type Kind = "method" | "property" | "function" | "column" | "keyword" | "module" | "variable" | "constant" | "table";
 type T = "df" | "series" | "str" | "dt" | "groupby" | "loc" | "pd" | "np" | "scalar" | "other";
 
 export interface Item {
@@ -341,7 +341,7 @@ function inStringOrComment(line: string): boolean {
   return q !== null;
 }
 
-function rank(items: Item[], prefix: string): Item[] {
+export function rank(items: Item[], prefix: string): Item[] {
   const p = prefix.toLowerCase();
   const starts = items.filter((i) => i.label.toLowerCase().startsWith(p));
   const contains = p ? items.filter((i) => !i.label.toLowerCase().startsWith(p) && i.label.toLowerCase().includes(p)) : [];

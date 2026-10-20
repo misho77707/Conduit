@@ -34,7 +34,7 @@ export function NewPipelineModal({ conns, onClose, onCreated }: { conns: Connect
   return (
     <Modal
       title="New pipeline"
-      sub="A saved read → transform → load recipe. Add transform steps after creating it."
+      sub="A saved read → transform → load recipe. Add transform steps after creating it; to join several sources, switch its source to Combined there."
       onClose={onClose}
       footer={
         <>

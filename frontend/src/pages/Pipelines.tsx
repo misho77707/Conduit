@@ -9,8 +9,10 @@ import { RowMenu } from "../ui/RowMenu";
 import { StatusBadge } from "../ui/Badge";
 import { NewPipelineModal } from "./pipelines/NewPipelineModal";
 import { remoteLabel } from "./remote/RemotePicker";
+import { combinedLabel } from "./pipelines/combined";
 
 function sourceLabel(p: PipelineOut, conns: ConnectionOut[]): { icon: string; text: string } {
+  if (p.source.combined) return { icon: "join_inner", text: `Combined · ${combinedLabel(p.source.combined, conns)}` };
   if (p.source.remote) {
     const r = p.source.remote;
     return { icon: "cloud", text: `${remoteLabel(r, conns).split("/").pop() || r.path}${r.match === "exact" ? "" : ` · ${r.match}`}` };
@@ -88,7 +90,7 @@ export function Pipelines() {
       ) : (
         <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, overflowX: "auto" }}>
           <div style={{ minWidth: 980 }}>
-            <div style={{ display: "grid", gridTemplateColumns: "minmax(220px,1.4fr) 170px minmax(220px,1.4fr) 60px 150px 110px 70px", gap: 12, padding: "0 16px", height: 36, alignItems: "center", borderBottom: "1px solid var(--border)", fontSize: 12, fontWeight: 500, color: "var(--text-3)" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "minmax(220px,1.4fr) minmax(170px,1.2fr) minmax(220px,1.4fr) 60px 150px 110px 70px", gap: 12, padding: "0 16px", height: 36, alignItems: "center", borderBottom: "1px solid var(--border)", fontSize: 12, fontWeight: 500, color: "var(--text-3)" }}>
               <span>Pipeline</span><span>Source</span><span>Target</span><span>Steps</span><span>Last run</span><span>Schedule</span><span />
             </div>
             {pipes.map((p) => {
@@ -96,12 +98,12 @@ export function Pipelines() {
               const targetConn = conns.find((c) => c.id === p.target.connection_id);
               const b = p.last_run ? statusBadge(p.last_run.status) : null;
               return (
-                <div key={p.id} className="hover-surface2" style={{ display: "grid", gridTemplateColumns: "minmax(220px,1.4fr) 170px minmax(220px,1.4fr) 60px 150px 110px 70px", gap: 12, padding: "0 16px", minHeight: 54, alignItems: "center", borderBottom: "1px solid var(--border)", position: "relative" }}>
+                <div key={p.id} className="hover-surface2" style={{ display: "grid", gridTemplateColumns: "minmax(220px,1.4fr) minmax(170px,1.2fr) minmax(220px,1.4fr) 60px 150px 110px 70px", gap: 12, padding: "0 16px", minHeight: 54, alignItems: "center", borderBottom: "1px solid var(--border)", position: "relative" }}>
                   <div style={{ minWidth: 0 }}>
                     <div style={{ fontFamily: "'Geist Mono',monospace", fontWeight: 500 }}>{p.name}</div>
                     <div style={{ fontSize: 12, color: "var(--text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.description || " "}</div>
                   </div>
-                  <span style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--text-2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}><Icon name={src.icon} style={{ fontSize: 16, color: "var(--text-3)" }} />{src.text}</span>
+                  <span title={src.text} style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--text-2)", minWidth: 0 }}><Icon name={src.icon} style={{ fontSize: 16, color: "var(--text-3)", flexShrink: 0 }} /><span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{src.text}</span></span>
                   <span style={{ fontFamily: "'Geist Mono',monospace", fontSize: 12, color: "var(--text-2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{targetConn?.name || "?"} · {p.target.table}</span>
                   <span style={{ fontFamily: "'Geist Mono',monospace", color: "var(--text-2)" }}>{p.steps.length}</span>
                   <div style={{ display: "flex", flexDirection: "column", gap: 2, alignItems: "flex-start" }}>
@@ -124,7 +126,7 @@ export function Pipelines() {
                   <div style={{ display: "flex", gap: 4, justifyContent: "flex-end", position: "relative" }}>
                     <Button height={28} padX={10} onClick={() => nav(`/pipelines/${p.id}`)} style={{ fontSize: 12 }}>Open</Button>
                     <RowMenu width={170} items={[
-                      { icon: "play_arrow", label: "Run now", onClick: () => runNow(p), disabled: !p.output_columns },
+                      { icon: "play_arrow", label: "Run now", onClick: () => runNow(p), disabled: !p.output_columns || (!!p.source.combined && !p.source_columns) },
                       ...(p.schedule ? [{ icon: p.enabled ? "pause" : "play_arrow", label: p.enabled ? "Pause schedule" : "Resume schedule", onClick: () => toggleEnabled(p) }] : []),
                       { icon: "delete", label: "Delete", tone: "var(--err)", onClick: () => remove(p) },
                     ]} />

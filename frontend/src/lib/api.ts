@@ -182,6 +182,34 @@ export interface FileSourceIn {
 export interface SourceIn {
   connection_id?: string | null; table?: string | null; query?: string | null; where?: string; file?: FileSourceIn | null;
   remote?: RemoteIn | null;
+  combined?: CombinedIn | null; // pipelines only
+}
+
+// ---- combined sources (pipelines only): backend/app/engine/spec.py CombinedIn ------------------------------
+
+export interface CombinedInputIn {
+  alias: string; // the table name the SQL uses for this input
+  source: SourceIn; // a table / query / file / remote file; its `where` is pushed down
+  columns?: string[] | null; // read only these columns (null = all)
+}
+export interface CombinedWatermarkIn {
+  column: string; // a column of the driver
+  overlap: number; // re-read this much below the saved value: seconds for date/time, else the column's units
+}
+export interface CombinedIn {
+  inputs: CombinedInputIn[]; // 2-8
+  sql: string; // one DuckDB SELECT over the aliases
+  mode: "staged" | "stream";
+  driver?: string | null; // an alias: streamed in stream mode, the watermark's input
+  watermark?: CombinedWatermarkIn | null;
+}
+/** What a pipeline preview reports about a combined source (backend/app/engine/combined.py preview). */
+export interface CombinedPreviewInfo {
+  mode: "staged" | "stream";
+  inputs: { alias: string; rows: number; capped: boolean; columns: { name: string; type: string }[] }[];
+  join_rows: number; // rows the SQL returned over the previewed inputs
+  notes: string[];
+  key_mismatches: string[]; // join conditions over columns of different kinds
 }
 
 // ---- remote files (S3 / SFTP / HTTP): backend/app/engine/spec.py RemoteIn, backend/app/api/remote.py ----------
@@ -256,6 +284,7 @@ export interface JobSnapshot {
   progress: number | null; rate_rows_s: number | null; eta_s: number | null; workers: number;
   splits_total: number; splits_done: number; error: string | null;
   created_at: string; started_at: string | null; finished_at: string | null; has_rejects: boolean;
+  phase: string | null; // a combined source: "staging …" / "joining" / "loading", then the final status
 }
 export interface JobSplitOut {
   idx: number; label: string; status: string; est_rows: number | null; rows_written: number;
@@ -422,11 +451,14 @@ export interface PipelineOut {
   next_run_at: string | null; created_at: string; updated_at: string; last_run: PipelineLastRun | null;
   // the scheduler's last look at a remote newest / all source that had nothing new (no job is created then)
   last_checked_at: string | null; last_check_note: string | null;
+  source_columns: StepOutCol[] | null; // a combined source's join schema, from the last full preview
 }
 export interface PipelinePreviewOut {
   columns: StepOutCol[]; rows: Record<string, unknown>[]; sampled_rows: number; full_chain: boolean;
   // set when a step failed: columns/rows are then the output of the step before it
   error: string | null; error_step: string | null;
+  combined?: CombinedPreviewInfo | null; // combined sources only
+  source_columns?: StepOutCol[] | null; // combined sources: the join SQL's exact output schema
 }
 
 export const pipelinesApi = {

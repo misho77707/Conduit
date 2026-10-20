@@ -1,16 +1,26 @@
-import { useEffect, useId, useState } from "react";
-import { connectionsApi, databasesOnly, type ConnectionOut, type SourceIn, type TargetIn } from "../../lib/api";
+import { useEffect, useId, useState, type ReactNode } from "react";
+import { connectionsApi, databasesOnly, type CombinedIn, type ConnectionOut, type SourceIn, type TargetIn } from "../../lib/api";
 import { emptyRemote, RemotePicker } from "../remote/RemotePicker";
 import { Field } from "../../ui/Field";
 import { Input, Select, TextArea } from "../../ui/Input";
 import { SegmentedControl } from "../../ui/SegmentedControl";
 import { Icon } from "../../ui/Icon";
+import { newCombined } from "./combined";
 
 type Mode = "append" | "replace" | "upsert";
 
-export function SourceEditor({ value, onChange, conns }: { value: SourceIn; onChange: (v: SourceIn) => void; conns: ConnectionOut[] }) {
+type Kind = "database" | "file" | "remote" | "combined";
+
+/**
+ * A table / query, a server file or a remote file. `combined` (pipelines only) adds a fourth kind, several inputs
+ * joined by SQL, and renders its editor. `asInput`: this is one input of a combined source.
+ */
+export function SourceEditor({ value, onChange, conns, combined, asInput }: {
+  value: SourceIn; onChange: (v: SourceIn) => void; conns: ConnectionOut[];
+  combined?: (c: CombinedIn, set: (c: CombinedIn) => void) => ReactNode; asInput?: boolean;
+}) {
   const isFile = !!value.file;
-  const kind = value.remote ? "remote" : isFile ? "file" : "database";
+  const kind: Kind = value.combined ? "combined" : value.remote ? "remote" : isFile ? "file" : "database";
   const view = value.query != null ? "query" : "table";
   const conn = conns.find((c) => c.id === value.connection_id);
   const [tables, setTables] = useState<string[]>([]);
@@ -21,17 +31,25 @@ export function SourceEditor({ value, onChange, conns }: { value: SourceIn; onCh
     if (value.connection_id) connectionsApi.tables(value.connection_id).then((ts) => setTables(ts.map((t) => t.name))).catch(() => {});
   }, [value.connection_id]);
 
-  function setKind(k: "database" | "file" | "remote") {
-    if (k === "file") onChange({ file: { path: "", header: true, encoding: "utf-8", skip_rows: 0, null_values: [""] }, where: "" });
+  function setKind(k: Kind) {
+    if (k === kind) return;
+    if (kind === "combined" && !confirm("Switch away from the combined source? Its inputs and SQL are discarded.")) return;
+    if (k === "combined") onChange({ combined: newCombined(value, conns), where: "" });
+    else if (k === "file") onChange({ file: { path: "", header: true, encoding: "utf-8", skip_rows: 0, null_values: [""] }, where: "" });
     else if (k === "remote") onChange({ remote: emptyRemote(conns.find((c) => c.type === "s3" || c.type === "sftp")?.id || null), where: "" });
     else onChange({ connection_id: databasesOnly(conns)[0]?.id || null, table: "", where: "" });
   }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <SegmentedControl small options={[{ id: "database", label: "Database" }, { id: "file", label: "Server file" }, { id: "remote", label: "Remote file" }]} value={kind} onChange={setKind} />
-      {kind === "remote" ? (
-        <RemotePicker value={value.remote || null} onChange={(r) => onChange({ remote: r, where: "" })} conns={conns} needsFormat={!!value.remote?.format} />
+      <SegmentedControl small value={kind} onChange={setKind} options={[
+        { id: "database", label: "Database" }, { id: "file", label: "Server file" }, { id: "remote", label: "Remote file" },
+        ...(combined ? [{ id: "combined" as const, label: "Combined" }] : []),
+      ]} />
+      {kind === "combined" && combined ? (
+        combined(value.combined!, (c) => onChange({ combined: c, where: "" }))
+      ) : kind === "remote" ? (
+        <RemotePicker value={value.remote || null} onChange={(r) => onChange({ remote: r, where: "" })} conns={conns} needsFormat={!!value.remote?.format} asInput={asInput} />
       ) : kind === "file" ? (
         <Field label="File path" hint="Path on the Conduit host, inside an allowed data folder.">
           <Input value={value.file?.path || ""} onChange={(e) => onChange({ ...value, file: { ...(value.file as any), path: e.target.value } })} />

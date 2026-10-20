@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { jobsApi, type JobSnapshot } from "../lib/api";
-import { fmtEta, fmtN, relativeTime, statusBadge } from "../lib/format";
+import { fmtEta, fmtN, prePhase, relativeTime, statusBadge } from "../lib/format";
 import { Button } from "../ui/Button";
 import { StatusBadge } from "../ui/Badge";
 import { ProgressBar } from "../ui/ProgressBar";
@@ -80,8 +80,8 @@ export function Jobs() {
                         <StatusBadge b={badge} size="sm" />
                       </div>
                       {active && <ProgressBar pct={pct} color="var(--warn)" height={4} />}
-                      <div style={{ fontSize: 11, color: "var(--text-3)" }}>
-                        {active ? `${pct.toFixed(1)}% · ${fmtN(j.rows_written)} rows` : j.finished_at ? `finished · ${relativeTime(j.finished_at)}` : relativeTime(j.created_at)}
+                      <div style={{ fontSize: 11, color: "var(--text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "100%" }}>
+                        {active && prePhase(j.phase) ? prePhase(j.phase) : active ? `${pct.toFixed(1)}% · ${fmtN(j.rows_written)} rows` : j.finished_at ? `finished · ${relativeTime(j.finished_at)}` : relativeTime(j.created_at)}
                         {j.status === "running" && j.eta_s != null ? ` · ~${fmtEta(j.eta_s)} left` : ""}
                       </div>
                     </button>

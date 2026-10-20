@@ -42,17 +42,19 @@ export function Button({ variant = "outline", icon, height = 32, padX = 12, styl
 }
 
 export function IconButton({
-  icon, title, onClick, size = 28, active, style,
-}: { icon: string; title?: string; onClick?: (e: MouseEvent<HTMLButtonElement>) => void; size?: number; active?: boolean; style?: CSSProperties }) {
+  icon, title, onClick, size = 28, active, style, disabled,
+}: { icon: string; title?: string; onClick?: (e: MouseEvent<HTMLButtonElement>) => void; size?: number; active?: boolean; style?: CSSProperties; disabled?: boolean }) {
   return (
     <button
       title={title}
       onClick={onClick}
+      disabled={disabled}
       className="hover-surface2"
       style={{
         width: size, height: size, borderRadius: 6, border: "none",
         background: active ? "var(--surface-3)" : "transparent", color: "var(--text-2)",
-        display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", ...style,
+        display: "flex", alignItems: "center", justifyContent: "center", cursor: disabled ? "default" : "pointer",
+        opacity: disabled ? 0.35 : 1, ...style,
       }}
     >
       <Icon name={icon} />

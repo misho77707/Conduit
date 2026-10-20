@@ -44,9 +44,11 @@ function extOf(name: string): string {
 /**
  * Choose a file (or a pattern of files) on an S3 / SFTP connection, or a URL. Emits a RemoteIn; inspecting it
  * is up to the caller. `needsFormat` shows a format picker (a URL whose name says nothing about its format).
+ * `asInput`: an input of a combined source, which reads every matched file each run (no skip-loaded).
  */
-export function RemotePicker({ value, onChange, conns, onConnsChanged, needsFormat }: {
+export function RemotePicker({ value, onChange, conns, onConnsChanged, needsFormat, asInput }: {
   value: RemoteIn | null; onChange: (v: RemoteIn) => void; conns: ConnectionOut[]; onConnsChanged?: () => void; needsFormat?: boolean;
+  asInput?: boolean;
 }) {
   const [kind, setKind] = useState<RemoteKind>(() => kindOf(value, conns));
   const [folder, setFolder] = useState("");
@@ -174,7 +176,7 @@ export function RemotePicker({ value, onChange, conns, onConnsChanged, needsForm
               {label("Which files")}
               <SegmentedControl small value={v.match} onChange={setMatch}
                 options={[{ id: "exact", label: "Exact file" }, { id: "newest", label: "Newest match" }, { id: "all", label: "All matches" }]} />
-              <span style={{ fontSize: 12, color: "var(--text-3)" }}>{MATCH_HELP[v.match]}</span>
+              <span style={{ fontSize: 12, color: "var(--text-3)" }}>{asInput && v.match === "all" ? "Every matching file, read together as this input on each run." : MATCH_HELP[v.match]}</span>
               {v.match === "exact" ? (
                 <div style={{ fontFamily: "'Geist Mono',monospace", fontSize: 12, color: v.path ? "var(--text)" : "var(--text-3)" }}>{v.path || "Click a file above."}</div>
               ) : (
@@ -184,8 +186,8 @@ export function RemotePicker({ value, onChange, conns, onConnsChanged, needsForm
                     <Input value={v.path} onChange={(e) => onChange({ ...v, path: e.target.value })} placeholder="exports/orders_*.csv" />
                   </label>
                   <MatchLine summary={summary} error={summaryError} />
-                  <ToggleRow on={v.skip_loaded} onClick={() => onChange({ ...v, skip_loaded: !v.skip_loaded })} title="Skip files already loaded into this target"
-                    sub="Each file is remembered once its rows are in the target. A file overwritten in place counts as changed and loads again." />
+                  {!asInput && <ToggleRow on={v.skip_loaded} onClick={() => onChange({ ...v, skip_loaded: !v.skip_loaded })} title="Skip files already loaded into this target"
+                    sub="Each file is remembered once its rows are in the target. A file overwritten in place counts as changed and loads again." />}
                 </>
               )}
             </div>

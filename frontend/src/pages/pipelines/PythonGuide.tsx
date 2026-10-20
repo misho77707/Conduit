@@ -144,10 +144,10 @@ const CHEATS: [string, string][] = [
   ["Concatenate text", `df["full"] = df["first"] + " " + df["last"]`],
 ];
 
-function Code({ text }: { text: string }) {
+export function Code({ text, lang = "py" }: { text: string; lang?: "py" | "sql" }) {
   return (
     <div style={{ background: "var(--code-bg)", border: "1px solid var(--border)", borderRadius: 6, padding: "8px 0", fontFamily: "'Geist Mono',monospace", fontSize: 12, lineHeight: "19px", overflowX: "auto" }}>
-      {highlight(text, "py").map((ln) => (
+      {highlight(text, lang).map((ln) => (
         <div key={ln.n} style={{ whiteSpace: "pre", padding: "0 12px", minHeight: 19 }}>
           {ln.segs.map((sg, i) => <span key={i} style={{ color: sg.c }}>{sg.t}</span>)}
         </div>
@@ -156,7 +156,7 @@ function Code({ text }: { text: string }) {
   );
 }
 
-function Point({ icon, children }: { icon: string; children: ReactNode }) {
+export function Point({ icon, children }: { icon: string; children: ReactNode }) {
   return (
     <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
       <Icon name={icon} style={{ fontSize: 17, color: "var(--accent)", marginTop: 1 }} />

@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { jobsApi, type JobDetail as JobDetailT } from "../../lib/api";
+import { jobsApi, type JobDetail as JobDetailT, type JobPlan } from "../../lib/api";
 import { useToast } from "../../lib/toast";
-import { fmtEta, fmtN, statusBadge } from "../../lib/format";
+import { fmtEta, fmtN, prePhase, statusBadge } from "../../lib/format";
 import { Icon } from "../../ui/Icon";
 import { Button } from "../../ui/Button";
 import { StatusBadge } from "../../ui/Badge";
@@ -46,6 +46,8 @@ export function JobDetail({ jobId, onChanged }: { jobId: string; onChanged: () =
   if (!job) return <div style={{ padding: 24, color: "var(--text-3)" }}>Loading…</div>;
 
   const active = ACTIVE.has(job.status);
+  const combined = !!job.spec?.source?.combined;
+  const notes = ((job.plan as JobPlan | null)?.notes || []).filter((n) => typeof n === "string");
   const pct = job.progress != null ? job.progress * 100 : 0;
   const badge = statusBadge(job.status);
   const barColor = job.status === "succeeded" ? "var(--ok)" : job.status === "cancelled" ? "var(--idle)" : job.status === "failed" || job.status === "stalled" ? "var(--err)" : "var(--accent)";
@@ -80,7 +82,7 @@ export function JobDetail({ jobId, onChanged }: { jobId: string; onChanged: () =
       <div style={{ display: "flex", gap: 12, alignItems: "flex-start", padding: "16px 18px", borderBottom: "1px solid var(--border)", flexWrap: "wrap" }}>
         <div style={{ flex: 1, minWidth: 260 }}>
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <Icon name={job.kind === "file_load" ? "description" : "database"} style={{ fontSize: 17, color: "var(--text-3)" }} />
+            <Icon name={combined ? "join_inner" : job.kind === "file_load" ? "description" : "database"} style={{ fontSize: 17, color: "var(--text-3)" }} />
             <span style={{ fontFamily: "'Geist Mono',monospace", fontWeight: 500, fontSize: 14 }}>{job.name}</span>
           </div>
           <div style={{ fontSize: 12, color: "var(--text-3)", marginTop: 4, fontFamily: "'Geist Mono',monospace" }}>
@@ -133,7 +135,23 @@ export function JobDetail({ jobId, onChanged }: { jobId: string; onChanged: () =
             <span style={{ fontSize: 12, color: "var(--text-3)" }}>{job.splits_done} / {job.splits_total} splits done</span>
           </div>
           <ProgressBar pct={pct} color={barColor} striped={job.status === "running"} />
+          {combined && active && job.phase && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-2)" }}>
+              <Icon name="hourglass_top" style={{ fontSize: 15, color: "var(--text-3)" }} />
+              <span style={{ fontFamily: "'Geist Mono',monospace" }}>{job.phase}</span>
+              {prePhase(job.phase) && <span style={{ color: "var(--text-3)" }}>· rows load after this</span>}
+            </div>
+          )}
         </div>
+
+        {combined && notes.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <span style={{ fontWeight: 600 }}>Combined source</span>
+            {notes.map((n) => (
+              <div key={n} style={{ display: "flex", gap: 6, fontSize: 12, color: "var(--text-2)" }}><Icon name="info" style={{ fontSize: 15, color: "var(--text-3)", flexShrink: 0 }} />{n}</div>
+            ))}
+          </div>
+        )}
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 1, background: "var(--border)", border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
           <Tile label="Rows written" value={fmtN(job.rows_written)} sub={job.rows_total != null ? `of ${job.rows_total_exact ? "" : "~"}${fmtN(job.rows_total)}` : "no estimate"} />

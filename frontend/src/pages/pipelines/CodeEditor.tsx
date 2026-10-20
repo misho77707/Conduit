@@ -12,14 +12,16 @@ const KIND_STYLE: Record<Kind, { tag: string; color: string }> = {
   module: { tag: "M", color: "var(--code-num)" },
   constant: { tag: "k", color: "var(--code-type)" },
   keyword: { tag: "k", color: "var(--text-3)" },
+  table: { tag: "t", color: "var(--code-str)" },
 };
 
 /**
- * Highlighted code with a transparent textarea on top. For Python (`suggest`), a completion popup offers
- * pandas / numpy members and the step's input column names (see pyComplete.ts).
+ * Highlighted code with a transparent textarea on top. With `suggest`, a completion popup offers pandas / numpy
+ * members and the step's input column names (see pyComplete.ts), or what `completer` returns (e.g. SQL names).
  */
-export function CodeEditor({ code, onChange, lang, suggest = false, columns = [] }: {
+export function CodeEditor({ code, onChange, lang, suggest = false, columns = [], completer }: {
   code: string; onChange: (v: string) => void; lang: "sql" | "py"; suggest?: boolean; columns?: string[];
+  completer?: (code: string, caret: number, force: boolean) => Completion | null;
 }) {
   const ta = useRef<HTMLTextAreaElement>(null);
   const box = useRef<HTMLDivElement>(null);
@@ -57,7 +59,7 @@ export function CodeEditor({ code, onChange, lang, suggest = false, columns = []
 
   function refresh(text: string, caret: number, force = false) {
     if (!suggest) return;
-    const c = complete(text, caret, columns, force);
+    const c = completer ? completer(text, caret, force) : complete(text, caret, columns, force);
     setComp(c ? { ...c, caret } : null);
     setActive(0);
   }
