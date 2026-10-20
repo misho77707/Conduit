@@ -221,8 +221,19 @@ def test_watermark_reads_only_new_driver_rows_and_sees_lookup_changes(client, au
     assert j["status"] == "succeeded" and j["rows_written"] == 2, j
     assert "rows with id > 30" in log_of(client, auth, j["id"])
     assert dst_rows(world, "select id, name from wm where id > 30 order by id") == [(31, "ANN"), (32, "bob")]
+
+    from app.db import get_sessionmaker
+    from app.models import Watermark
+
+    def saved():
+        with get_sessionmaker()() as s:
+            return [w.source_key for w in s.query(Watermark)]
+
     j = run_pipeline(client, auth, pid)  # nothing new: 0 rows, the watermark stays
     assert j["status"] == "succeeded" and j["rows_written"] == 0, j
+    assert saved() == [f"pipeline:{pid}:events"]
+    assert client.delete(f"/api/pipelines/{pid}", headers=auth).status_code == 204
+    assert saved() == []  # deleting the pipeline deletes its watermark
 
 
 def test_overlap_with_upsert(client, auth, world):

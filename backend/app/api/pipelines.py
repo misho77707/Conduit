@@ -4,7 +4,7 @@ from typing import Any
 import pyarrow as pa
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.concurrency import run_in_threadpool
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ..db import get_session
@@ -20,7 +20,7 @@ from ..engine.spec import JobIn, OptionsIn, SourceIn, StepIn, StepOutCol, Target
 from ..engine.steps import StepError, apply_steps, compile_steps, infer_colspecs
 from ..engine.types import to_arrow
 from ..connectors import category_of
-from ..models import Connection, Job, Pipeline, User, utcnow
+from ..models import Connection, Job, Pipeline, User, Watermark, utcnow
 from ..schemas import PipelineIn, PipelineLastRunOut, PipelineOut, PipelinePatch, PipelinePreviewIn, PipelinePreviewOut
 from .jobs import _dispatch
 
@@ -125,6 +125,8 @@ def update_pipeline(pipeline_id: uuid.UUID, body: PipelinePatch, session: Sessio
 @router.delete("/{pipeline_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(current_user)])
 def delete_pipeline(pipeline_id: uuid.UUID, session: Session = Depends(get_session)) -> None:
     p = _pipeline_or_404(session, pipeline_id)
+    # a combined source's watermarks are keyed by the pipeline ("pipeline:<id>:<driver>"): they go with it
+    session.execute(delete(Watermark).where(Watermark.source_key.startswith(f"pipeline:{p.id}:")))
     session.delete(p)
     session.commit()
 
