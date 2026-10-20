@@ -59,6 +59,11 @@ backend/app/
     transform.py       column mapping, type casts, date formats
     steps.py           pipeline transform steps: rename/cast/filter/derive/split, SQL, Python
     schedule.py        pipeline scheduling: cron validation, next-run math, the due/claim logic
+    sources.py         a source's adapter and raw columns (pipeline preview, Compare, combined inputs)
+    staging.py         copying sources into a DuckDB file in parallel (Compare and combined sources)
+    combined.py        combined sources: SQL checks, join-key checks, the preview
+    combined_run.py    a combined source inside its job: staged runs, the watermark, the disk floor
+    combined_stream.py stream mode: lookups in memory, the driver streamed
     types.py, ddl.py   one logical type vocabulary and per-database CREATE TABLE
   compare/           source vs target diffs: spec, DuckDB diff engine, result exports
   monitor/           service checks (HTTP / TCP / query) and host resources (psutil)
@@ -75,6 +80,7 @@ frontend/src/
     upload/          the 4-step wizard: Wizard, Step1Source .. Step4Review, jobBuilder.ts (state -> JobIn)
     pipelines/       Builder (3-column: steps sidebar, step editor, live preview), NewPipelineModal,
                      StepEditor (one editor per step kind), SourceTargetEditor (shared read/load editors),
+                     CombinedEditor + combined.ts + sqlComplete.ts (combined sources: inputs, mode, SQL, watermark),
                      ScheduleModal (cron + enabled, with a "run a full preview now" fix-it path)
   theme.css          tokens ported verbatim from frontend/design/Conduit v2.dc.html
 frontend/design/      the original Claude Design prototype (reference only, not built/served)
@@ -116,7 +122,7 @@ frontend/design/      the original Claude Design prototype (reference only, not 
 | POST | /monitor/checks/{id}/run | run one check now (409 if it is running) |
 | GET/POST | /pipelines | list / create a saved pipeline |
 | GET/PATCH/DELETE | /pipelines/{id} | read / update (source/steps changes clear the cached schema; schedule/enabled changes recompute `next_run_at`) / delete |
-| POST | /pipelines/{id}/preview | sample the source, run the step chain, return columns + rows; a full-chain preview caches the schema `/run` needs |
+| POST | /pipelines/{id}/preview | sample the source, run the step chain, return columns + rows; a full-chain preview caches the schema `/run` needs (a combined source also returns `combined`: rows per input, the join's row count, notes, join-key mismatches) |
 | POST | /pipelines/{id}/run | run it now as a job (`kind: "pipeline"`); 422 if there's no cached schema yet (preview first) |
 | POST | /compare/columns | both sides' columns, the automatic pairing (same names) and the suggested key |
 | GET/POST | /compare | list the latest comparisons / start one (`CompareIn`; bad tables, columns or keys fail with 422 right away) |
@@ -264,7 +270,8 @@ A pipeline is a saved, named `source -> steps -> target` recipe. Running one cre
 remembers the recipe and the schema it last produced, and points at its most recent job.
 
 **The read and the target stay exactly like an ad-hoc job**: `source` (a table, query or file) and
-`target` (connection, table, mode) are the same shapes `POST /jobs` takes. `steps` sit between them and
+`target` (connection, table, mode) are the same shapes `POST /jobs` takes. A pipeline's source can also be
+`combined`: several inputs joined by one SQL (see Combined sources). `steps` sit between them and
 run once per batch, in order, over the same Arrow batches the load engine already streams — there's no
 separate pipeline execution engine. Every visual step compiles to one generated SQL statement run in an
 in-process DuckDB; a `sql` step is your own statement; a `python` step execs a `def transform(df): ...`
@@ -313,9 +320,9 @@ column, with pause/resume in the row menu.
 **Known limits (v1)**
 - **Per batch, not over the whole result.** A step sees one batch at a time (same batches the rest of
   the load engine reads/writes), never the complete source. `GROUP BY`, `DISTINCT` and window functions
-  across the *whole* table are not supported — an aggregation-shaped pipeline (an hourly rollup, say)
-  needs a different execution model this version doesn't have. Row-wise/batch-safe SQL (a `LEFT JOIN`
-  against a small reference table, computed columns) works fine.
+  across the *whole* table are not supported in a step. Row-wise/batch-safe SQL (a `LEFT JOIN` against a
+  small reference table, computed columns) works fine. For whole-data SQL (an hourly rollup, say), use a
+  staged combined source (below): its SQL runs once over all of its inputs.
 - **No parallel splits.** `options.split_column` is rejected when `steps` is non-empty: a pipeline
   always reads its source in one piece. (`workers` / chunk sizes still apply to everything else.)
   Splittable, incremental pipelines are a later iteration.
@@ -329,6 +336,80 @@ column, with pause/resume in the row menu.
   no new files" on the pipeline, shown in the list and the schedule dialog), so an hourly schedule never
   pushes real loads out of the 10 kept jobs. A manual Run with nothing new still makes a 0-row job.
   A watched folder isn't built.
+
+## Combined sources
+
+A pipeline's source can be **combined**: 2 to 8 inputs, each a table, a query, a server file or a remote file
+under a name of its own (its alias), joined by one DuckDB `SELECT` over those aliases. The inputs can live in
+different databases: ClickHouse events with a Postgres users table, say. Only pipelines have it (not the wizard,
+not Compare); in the builder it is the fourth kind of **Read source**, **Combined**.
+
+```json
+"source": {"combined": {
+  "inputs": [
+    {"alias": "events", "source": {"connection_id": "<clickhouse>", "table": "default.events", "where": "ts >= '2026-01-01'"},
+     "columns": ["id", "user_id", "amount", "ts"]},
+    {"alias": "users", "source": {"connection_id": "<postgres>", "table": "public.users"}}
+  ],
+  "sql": "SELECT e.*, u.country FROM events AS e LEFT JOIN users AS u ON u.id = e.user_id",
+  "mode": "staged",
+  "driver": "events",
+  "watermark": {"column": "ts", "overlap": 3600}
+}}
+```
+
+An input's `where` and `columns` are pushed down to its source. Steps after the source run per batch over the
+joined rows as usual, and the target gets the SQL's columns (types from the one logical type vocabulary).
+
+**Two modes.**
+
+| | `staged` (default) | `stream` |
+|---|---|---|
+| How it runs | every input is copied into a scratch DuckDB file (`/data/combined/jobs/<job id>/`), the SQL runs once, the result is loaded | the `driver` is read batch by batch; every other input (a lookup) is read into memory once; the SQL runs once per driver batch |
+| SQL | anything DuckDB runs: `GROUP BY`, `DISTINCT`, window functions, two big tables | each row's result may not depend on other batches: no top-level `GROUP BY` / `DISTINCT` / window / aggregate / `LIMIT` (refused when saved) |
+| Disk | about the inputs' size (dropped after the join), then the result until the job succeeds | none |
+| Memory | DuckDB spills to the scratch file | the lookups, capped at `CONDUIT_COMBINED_LOOKUP_MAX_ROWS` (5M) rows each and `_MAX_MB` (2 GB) together: a bigger one fails the job early and points to staged mode |
+| Retry | loads the rest of the staged result after its last committed row: no source is read again, no row loads twice | restarts the driver (from the saved watermark): pair it with upsert |
+
+**What a run shows.** A staged run goes through `staging events 1.2M / ~3.0M · users 50k / ~50k` (rows read per
+input against the source's estimate), `joining`, then `loading`, shown on the job page and in the Jobs list. The
+progress bar and ETA start with loading, when the result's row count is known exactly: there is no ETA while
+staging. A stream run shows `loading lookups …`, then `loading (streaming events)`. The job's notes list the
+inputs and their row counts, and the job's source connection is the driver's (else the first database input's).
+
+**Watermark.** With a `driver` and `watermark.column`, each run reads only the driver's rows whose column is above
+the highest value the last *successful* run loaded (the first run reads everything); the other inputs are read in
+full every time. The value is saved only when the job succeeds (in the `watermarks` table, keyed by the pipeline,
+the driver's alias and the target), so a failed run's rows are read again by the next one. `overlap` re-reads that
+much below the saved value, for rows that arrive late: seconds for a date/time column (the builder asks in
+minutes), the column's own units for a number. Pair an overlap with an upsert target, or re-read rows load twice
+(the builder warns). Database drivers get the condition pushed down; file drivers are filtered as they are read.
+Two runs of the same watermarked pipeline never overlap: the second one fails at once with a message.
+
+**Preview.** Each input is read up to `CONDUIT_COMBINED_PREVIEW_ROWS` (100k) rows, in memory, and the SQL runs over
+those. The output schema is exact even when the sample has no matching rows, and it is cached: launching a run
+reads nothing, the staging happens inside the job. The preview also reports the rows read per input (a capped one
+is marked: matches beyond its first rows are missing from the preview), the join's row count, inputs the SQL does
+not use, and join conditions whose two columns hold different kinds of values (a number joined to text: cast one
+side). Editing inputs, SQL, mode or watermark clears the cache, so `/run` and the scheduler wait for a new preview.
+
+**Disk.** Staged mode checks the data folder's free space before staging and every second while staging, and
+stops with a clear error below `CONDUIT_COMBINED_MIN_FREE_GB` (5) or `CONDUIT_COMBINED_MIN_FREE_PCT` (5 %) of the
+disk, whichever is larger. DuckDB stores the inputs compressed and columnar, typically well below their size in the
+source database. The scratch folder is deleted when the job succeeds; a failed or cancelled job keeps it for a
+Retry until the job is deleted or pruned.
+
+**Limits.**
+- Two huge inputs (two 500M-row tables, say) are both copied before the join: expect tens of GB of scratch space,
+  depending on the columns. Read only the columns the SQL needs, narrow with `where`, or use a watermark so each run
+  stages only the new driver rows.
+- Stream mode holds the lookups in the worker's memory, per job: several concurrent stream jobs add up.
+- A watermark on a ClickHouse insert-time column misses rows that arrive later than the overlap allows (a row
+  whose value is already below the saved watermark minus the overlap is never read). Give late data a generous
+  overlap with upsert, or watermark on a column assigned at insert time.
+- Remote file inputs are read in full every run (every file a `newest` / `all` pattern matches); skip-loaded
+  applies to a plain remote source, not to inputs.
+- A combined source is read as a whole: `options.strategy` must be `full`, without a `split_column`.
 
 ## Remote files (S3 / SFTP / URL)
 
@@ -652,3 +733,21 @@ celery -A app.worker.celery_app beat --loglevel=info
   and a public HTTPS URL (the test machine sits behind a TLS-intercepting proxy; see Remote files, Limits).
   S3 runs in the test suite against moto, SFTP against an in-process paramiko server, HTTP against
   `http.server`.
+- **Combined sources** were verified live through the running stack (jobs on the real Celery worker, schedules on
+  the real beat) against a local ClickHouse 24.8 and PostgreSQL 16, and the new screens in a headless Chrome
+  driven over the DevTools protocol (the browser extension wasn't connected in that session): switching a
+  pipeline's source to Combined, choosing the second input (its placeholder alias took the table's name), SQL
+  suggestions after `alias.`, the preview strip (a capped 3M-row input, the join's row count, notes), stream mode
+  with its driver, the watermark column / overlap in minutes with the append-target warning, the examples guide,
+  the list label, and a staged job's phases (`staging … / ~3.0M`, `joining`, `loading`) on the job page. Zero
+  console errors apart from 422s caused on purpose by saving half-typed SQL. Runs: a staged LEFT JOIN of 3M
+  ClickHouse events with 50k Postgres users (staging took about 6 s), with the worker killed at 400k loaded rows:
+  the job went stalled, Retry reused the staged result without reading either source again, and the target held
+  exactly 3,000,000 distinct rows, which Compare against the ClickHouse table found identical. A staged daily
+  `GROUP BY` matched ClickHouse's own counts and sums. Stream mode with a `ts` watermark and a 10-minute overlap
+  into an upsert target on a `* * * * *` schedule: the first run loaded 3M rows; after 1,000 newer rows, one late
+  row inside the overlap and one older than it went into ClickHouse, the next scheduled run wrote 1,601 rows (600
+  re-read, 1,000 new, the late one) and the one after it 600, leaving 3,001,001 distinct rows; the row older than
+  the overlap was never read, as documented. **Not verified live**: remote-file, MongoDB and MySQL inputs (tests
+  only: CSV inputs, mongomock), the disk floor tripping on a real disk, and a stream lookup over its caps on a real
+  server (both in tests).

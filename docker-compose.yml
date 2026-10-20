@@ -29,6 +29,12 @@ x-backend: &backend
     CONDUIT_REMOTE_CACHE_MB: ${CONDUIT_REMOTE_CACHE_MB:-2048}
     CONDUIT_REMOTE_TIMEOUT_S: ${CONDUIT_REMOTE_TIMEOUT_S:-60}
     CONDUIT_REMOTE_LIST_MAX: ${CONDUIT_REMOTE_LIST_MAX:-100000}
+    # Combined pipeline sources (several inputs joined by SQL): see README "Combined sources"
+    CONDUIT_COMBINED_PREVIEW_ROWS: ${CONDUIT_COMBINED_PREVIEW_ROWS:-100000}
+    CONDUIT_COMBINED_LOOKUP_MAX_ROWS: ${CONDUIT_COMBINED_LOOKUP_MAX_ROWS:-5000000}
+    CONDUIT_COMBINED_LOOKUP_MAX_MB: ${CONDUIT_COMBINED_LOOKUP_MAX_MB:-2048}
+    CONDUIT_COMBINED_MIN_FREE_GB: ${CONDUIT_COMBINED_MIN_FREE_GB:-5}
+    CONDUIT_COMBINED_MIN_FREE_PCT: ${CONDUIT_COMBINED_MIN_FREE_PCT:-5}
     # Behind a TLS-intercepting proxy, mount its root CA into api + worker (e.g. ./certs/ca.pem:/certs/ca.pem:ro)
     # and add SSL_CERT_FILE: /certs/ca.pem and AWS_CA_BUNDLE: /certs/ca.pem here (never set them empty: OpenSSL
     # would then trust nothing).
