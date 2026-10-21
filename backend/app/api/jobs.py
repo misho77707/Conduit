@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..db import get_session, get_sessionmaker
-from ..deps import current_user, current_user_sse
+from ..deps import admin_only, viewer_ok, viewer_ok_sse
 from ..engine import joblog
 from ..engine.runner import JobError, make_plan, prepare, rejects_path, run_job, short_error, snapshot
 from ..engine.spec import JobIn
@@ -54,7 +54,7 @@ def _plan_or_422(spec: JobIn, session: Session, sample_rows: int) -> dict[str, A
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, short_error(e)) from e
 
 
-@router.post("/plan", dependencies=[Depends(current_user)])
+@router.post("/plan", dependencies=[Depends(admin_only)])
 async def plan(body: JobIn, sample_rows: int = Query(2000, ge=0, le=20000), session: Session = Depends(get_session)) -> dict:
     """Dry run for the review step: columns, DDL, splits, row estimate and a timed sample. Writes nothing."""
     return await run_in_threadpool(_plan_or_422, body, session, sample_rows)
@@ -100,7 +100,7 @@ def _create(body: JobIn, session: Session, user: User) -> Job:
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
-def create_job(body: JobIn, session: Session = Depends(get_session), user: User = Depends(current_user)) -> dict:
+def create_job(body: JobIn, session: Session = Depends(get_session), user: User = Depends(admin_only)) -> dict:
     job = _create(body, session, user)
     joblog.push(job.id, "info", "queued")
     _dispatch(job, session)
@@ -108,7 +108,7 @@ def create_job(body: JobIn, session: Session = Depends(get_session), user: User 
     return snapshot(job)
 
 
-@router.get("", dependencies=[Depends(current_user)])
+@router.get("", dependencies=[Depends(viewer_ok)])
 def list_jobs(session: Session = Depends(get_session)) -> list[dict]:
     jobs = list(session.scalars(select(Job).order_by(Job.created_at.desc()).limit(50)))
     order = {"running": 0, "planning": 0, "queued": 1}
@@ -127,18 +127,18 @@ def _detail(session: Session, job: Job, log_lines: int = 40) -> dict[str, Any]:
     return snap
 
 
-@router.get("/{job_id}", dependencies=[Depends(current_user)])
+@router.get("/{job_id}", dependencies=[Depends(viewer_ok)])
 def get_job(job_id: uuid.UUID, session: Session = Depends(get_session)) -> dict:
     return _detail(session, _job_or_404(session, job_id))
 
 
-@router.get("/{job_id}/log", dependencies=[Depends(current_user)])
+@router.get("/{job_id}/log", dependencies=[Depends(viewer_ok)])
 def get_log(job_id: uuid.UUID, n: int = Query(100, ge=1, le=200), session: Session = Depends(get_session)) -> list[dict]:
     _job_or_404(session, job_id)
     return joblog.tail(job_id, n)
 
 
-@router.post("/{job_id}/cancel", dependencies=[Depends(current_user)])
+@router.post("/{job_id}/cancel", dependencies=[Depends(admin_only)])
 def cancel_job(job_id: uuid.UUID, session: Session = Depends(get_session)) -> dict:
     job = _job_or_404(session, job_id)
     if job.status not in _ACTIVE:
@@ -151,7 +151,7 @@ def cancel_job(job_id: uuid.UUID, session: Session = Depends(get_session)) -> di
     return snapshot(job, [])
 
 
-@router.post("/{job_id}/retry", dependencies=[Depends(current_user)])
+@router.post("/{job_id}/retry", dependencies=[Depends(admin_only)])
 def retry_job(job_id: uuid.UUID, session: Session = Depends(get_session)) -> dict:
     """Continue a failed or cancelled job: finished splits stay done, the rest resume from their last committed batch."""
     job = _job_or_404(session, job_id)
@@ -165,7 +165,7 @@ def retry_job(job_id: uuid.UUID, session: Session = Depends(get_session)) -> dic
     return snapshot(job)
 
 
-@router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(current_user)])
+@router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(admin_only)])
 def delete_job(job_id: uuid.UUID, session: Session = Depends(get_session)) -> None:
     job = _job_or_404(session, job_id)
     if job.status in _ACTIVE:
@@ -178,7 +178,7 @@ def delete_job(job_id: uuid.UUID, session: Session = Depends(get_session)) -> No
     session.commit()
 
 
-@router.get("/{job_id}/rejects", dependencies=[Depends(current_user)])
+@router.get("/{job_id}/rejects", dependencies=[Depends(admin_only)])
 def download_rejects(job_id: uuid.UUID, session: Session = Depends(get_session)) -> FileResponse:
     _job_or_404(session, job_id)
     p = rejects_path(job_id)
@@ -193,7 +193,7 @@ def _read_detail(job_id: uuid.UUID) -> dict[str, Any] | None:
         return _detail(s, job, 15) if job else None
 
 
-@router.get("/{job_id}/events", dependencies=[Depends(current_user_sse)])
+@router.get("/{job_id}/events", dependencies=[Depends(viewer_ok_sse)])
 async def events(job_id: uuid.UUID) -> StreamingResponse:
     """Server-sent events: the job's state once a second until it finishes. Pass ?token=<jwt> (EventSource cannot set headers)."""
     first = await run_in_threadpool(_read_detail, job_id)

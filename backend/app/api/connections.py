@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..connectors import REGISTRY, UnknownConnectorType, category_of, db_types, get_connector
 from ..db import get_session
-from ..deps import current_user
+from ..deps import admin_only
 from ..models import Connection, User
 from ..schemas import (
     ConnectionIn, ConnectionOut, ConnectionPatch, ConnectionTestIn, ConnectionTestOut, TableOut, TableSchemaOut,
@@ -20,8 +20,8 @@ from ..services import (
     all_connections, build_connector, serialize, set_secrets, test_connection, test_many,
 )
 
-router = APIRouter(prefix="/connections", tags=["connections"], dependencies=[Depends(current_user)])
-meta_router = APIRouter(prefix="/meta", tags=["meta"], dependencies=[Depends(current_user)])
+router = APIRouter(prefix="/connections", tags=["connections"], dependencies=[Depends(admin_only)])
+meta_router = APIRouter(prefix="/meta", tags=["meta"], dependencies=[Depends(admin_only)])
 
 
 @meta_router.get("/db-types")
@@ -58,7 +58,7 @@ def list_connections(session: Session = Depends(get_session)) -> list[Connection
 
 @router.post("", response_model=ConnectionOut, status_code=status.HTTP_201_CREATED)
 def create_connection(
-    body: ConnectionIn, session: Session = Depends(get_session), user: User = Depends(current_user)
+    body: ConnectionIn, session: Session = Depends(get_session), user: User = Depends(admin_only)
 ) -> ConnectionOut:
     _validate(body.type, body.config, body.secrets)
     conn = Connection(name=body.name.strip(), type=body.type, env=body.env, config=body.config, owner_id=user.id)

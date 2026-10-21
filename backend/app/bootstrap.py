@@ -1,4 +1,4 @@
-"""First-run setup: make sure a local admin exists."""
+"""First-run setup: an empty users table gets one superadmin (CONDUIT_ADMIN_USER / CONDUIT_ADMIN_PASSWORD)."""
 import logging
 import secrets
 
@@ -21,13 +21,16 @@ def seed_admin() -> None:
         generated = not password
         if generated:
             password = secrets.token_urlsafe(12)
-        session.add(User(username=s.admin_user, password_hash=hash_password(password), role="admin"))
+        # A generated password is only ever shown in this log: it is temporary, the first sign-in replaces it
+        session.add(User(username=s.admin_user, password_hash=hash_password(password), role="superadmin",
+                         must_change_password=generated))
         session.commit()
     if generated:
         # Shown once. Set CONDUIT_ADMIN_PASSWORD to choose your own.
-        log.warning("Created admin user '%s' with generated password: %s", s.admin_user, password)
+        log.warning("Created superadmin '%s' with a temporary generated password (set a new one at first sign-in): %s",
+                    s.admin_user, password)
     else:
-        log.info("Created admin user '%s'", s.admin_user)
+        log.info("Created superadmin '%s'", s.admin_user)
 
 
 if __name__ == "__main__":

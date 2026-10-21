@@ -42,8 +42,46 @@ def client(env):
         yield c
 
 
-@pytest.fixture()
-def auth(client):
-    r = client.post("/api/auth/login", json={"username": "admin", "password": "test-pass-123"})
+PASSWORD = "test-pass-123"
+
+
+def login(client, username: str, password: str = PASSWORD) -> dict:
+    r = client.post("/api/auth/login", json={"username": username, "password": password})
     assert r.status_code == 200, r.text
     return {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+
+def make_user(username: str, role: str, password: str = PASSWORD, **fields):
+    """A user straight in the database (the users API has its own tests)."""
+    from app.db import get_sessionmaker
+    from app.models import User
+    from app.security import hash_password
+
+    with get_sessionmaker()() as s:
+        u = User(username=username, role=role, password_hash=hash_password(password), **fields)
+        s.add(u)
+        s.commit()
+        return u.id
+
+
+@pytest.fixture()
+def auth_superadmin(client):
+    return login(client, "admin")  # the first-run account (CONDUIT_ADMIN_PASSWORD above)
+
+
+@pytest.fixture()
+def auth_admin(client):
+    make_user("alice", "admin")
+    return login(client, "alice")
+
+
+@pytest.fixture()
+def auth_viewer(client):
+    make_user("victor", "viewer")
+    return login(client, "victor")
+
+
+@pytest.fixture()
+def auth(auth_admin):
+    """What most tests run as: an admin (everything but user management)."""
+    return auth_admin

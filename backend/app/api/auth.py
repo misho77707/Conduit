@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_session
-from ..deps import current_user
+from ..deps import self_service
 from ..models import User
 from ..schemas import LoginIn, TokenOut, UserOut
 from ..security import create_token, verify_password
@@ -43,5 +43,5 @@ def login(body: LoginIn, request: Request, session: Session = Depends(get_sessio
 
 
 @router.get("/me", response_model=UserOut)
-def me(user: User = Depends(current_user)) -> User:
+def me(user: User = Depends(self_service)) -> User:
     return user

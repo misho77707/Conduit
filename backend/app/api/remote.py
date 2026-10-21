@@ -15,12 +15,12 @@ from .. import remote as rmt
 from ..connectors.base import UserFacingError
 from ..connectors.storage import RemoteNotFound
 from ..db import get_session
-from ..deps import current_user
+from ..deps import admin_only
 from ..engine.spec import RemoteIn
 from ..files import UnsupportedFormat, format_from_name
 from ..schemas import FileInspectOut
 
-router = APIRouter(prefix="/remote", tags=["remote"], dependencies=[Depends(current_user)])
+router = APIRouter(prefix="/remote", tags=["remote"], dependencies=[Depends(admin_only)])
 
 
 class TargetRef(BaseModel):

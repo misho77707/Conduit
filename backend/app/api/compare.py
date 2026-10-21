@@ -17,7 +17,7 @@ from ..compare.engine import FINISHED, describe, folder, is_stalled, resolve, ru
 from ..compare.spec import CompareIn, SidesIn
 from ..config import get_settings
 from ..db import get_session
-from ..deps import current_user
+from ..deps import admin_only, viewer_ok
 from ..engine.runner import JobError, short_error
 from ..engine.sources import SourceUnavailable
 from ..models import Comparison, User, utcnow
@@ -43,7 +43,7 @@ def _label(side: Any) -> str:
     return side.table or ("file " + side.file.path.rsplit("/", 1)[-1] if side.file else "query")
 
 
-@router.post("/columns", dependencies=[Depends(current_user)])
+@router.post("/columns", dependencies=[Depends(admin_only)])
 async def columns(body: SidesIn, session: Session = Depends(get_session)) -> dict:
     """Both sides' columns, the automatic pairing (same names) and the suggested key, for the setup screen."""
     try:
@@ -68,7 +68,7 @@ def _dispatch(c: Comparison, session: Session) -> None:
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
-async def create(body: CompareIn, session: Session = Depends(get_session), user: User = Depends(current_user)) -> dict:
+async def create(body: CompareIn, session: Session = Depends(get_session), user: User = Depends(admin_only)) -> dict:
     try:  # fail fast on a bad request (unknown table / column / key) instead of queueing something doomed
         await run_in_threadpool(resolve, session, body)
     except JobError as e:
@@ -82,12 +82,12 @@ async def create(body: CompareIn, session: Session = Depends(get_session), user:
     return snapshot(c)
 
 
-@router.get("", dependencies=[Depends(current_user)])
+@router.get("", dependencies=[Depends(viewer_ok)])
 def list_comparisons(session: Session = Depends(get_session)) -> list[dict]:
     return [snapshot(c) for c in session.scalars(select(Comparison).order_by(Comparison.created_at.desc()).limit(50))]
 
 
-@router.get("/{cid}", dependencies=[Depends(current_user)])
+@router.get("/{cid}", dependencies=[Depends(viewer_ok)])
 def get_comparison(cid: uuid.UUID, session: Session = Depends(get_session)) -> dict:
     return snapshot(_or_404(session, cid))
 
@@ -98,7 +98,7 @@ def _finished(c: Comparison) -> dict[str, Any]:
     return c.summary
 
 
-@router.get("/{cid}/rows", dependencies=[Depends(current_user)])
+@router.get("/{cid}/rows", dependencies=[Depends(admin_only)])
 async def result_rows(cid: uuid.UUID, set: str = Query("missing"), offset: int = Query(0, ge=0),  # noqa: A002
                       limit: int = Query(100, ge=1, le=1000), session: Session = Depends(get_session)) -> dict:
     c = _or_404(session, cid)
@@ -111,7 +111,7 @@ async def result_rows(cid: uuid.UUID, set: str = Query("missing"), offset: int =
         raise HTTPException(status.HTTP_410_GONE, str(e)) from e
 
 
-@router.get("/{cid}/export", dependencies=[Depends(current_user)])
+@router.get("/{cid}/export", dependencies=[Depends(admin_only)])
 async def export(cid: uuid.UUID, sets: str = Query(..., description="comma separated: missing,extra,mismatched,dup_source,dup_target"),
                  columns: str = Query("all", description="all | keys | comma separated column names"),
                  format: str = Query("csv"), rows: str = Query("all", pattern="^(all|sample)$"),  # noqa: A002
@@ -130,7 +130,7 @@ async def export(cid: uuid.UUID, sets: str = Query(..., description="comma separ
     return FileResponse(path, media_type=media, filename=filename, background=BackgroundTask(cexport.remove_folder, path.parent))
 
 
-@router.post("/{cid}/cancel", dependencies=[Depends(current_user)])
+@router.post("/{cid}/cancel", dependencies=[Depends(admin_only)])
 def cancel(cid: uuid.UUID, session: Session = Depends(get_session)) -> dict:
     c = _or_404(session, cid)
     if c.status in FINISHED:
@@ -144,7 +144,7 @@ def cancel(cid: uuid.UUID, session: Session = Depends(get_session)) -> dict:
     return snapshot(c)
 
 
-@router.delete("/{cid}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(current_user)])
+@router.delete("/{cid}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(admin_only)])
 def delete(cid: uuid.UUID, session: Session = Depends(get_session)) -> None:
     c = _or_404(session, cid)
     if c.status not in FINISHED and not is_stalled(c):

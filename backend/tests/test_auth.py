@@ -1,7 +1,7 @@
-def test_login_ok_and_me(client, auth):
-    r = client.get("/api/auth/me", headers=auth)
+def test_login_ok_and_me(client, auth_superadmin):
+    r = client.get("/api/auth/me", headers=auth_superadmin)
     assert r.status_code == 200
-    assert r.json()["username"] == "admin" and r.json()["role"] == "admin"
+    assert r.json()["username"] == "admin" and r.json()["role"] == "superadmin"  # the first-run account
     assert "password" not in r.text
 
 

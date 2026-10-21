@@ -1,7 +1,8 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, BigInteger, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import (JSON, BigInteger, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text,
+                        UniqueConstraint, Uuid)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -15,17 +16,28 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+ROLES = ("superadmin", "admin", "viewer")
+
+
 class User(Base):
-    """Single local admin for now. Role + table exist so team mode is an upgrade, not a rewrite."""
+    """A local account. Roles (app/deps.py): superadmin (also manages users), admin (everything else), viewer
+    (read-only). Authorization always uses the row's role, never the token's claim."""
 
     __tablename__ = "users"
+    __table_args__ = (CheckConstraint("role IN ('superadmin', 'admin', 'viewer')", name="ck_users_role"),)
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     username: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
-    role: Mapped[str] = mapped_column(String(20), default="admin")  # admin | member | viewer
+    role: Mapped[str] = mapped_column(String(20), default="viewer")  # superadmin | admin | viewer
     is_active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Set by a superadmin's temporary password: nothing but changing it works until the user does
+    must_change_password: Mapped[bool] = mapped_column(default=False)
+    # In every token; bumped (password change / reset, role change, deactivation) to end the user's sessions
+    token_version: Mapped[int] = mapped_column(Integer, default=0)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
 
     connections: Mapped[list["Connection"]] = relationship(back_populates="owner")
 
@@ -54,7 +66,7 @@ class Connection(Base):
     note: Mapped[str | None] = mapped_column(String(500), nullable=True)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    owner_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     owner: Mapped[User | None] = relationship(back_populates="connections")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -88,8 +100,9 @@ class Job(Base):
     phase: Mapped[str | None] = mapped_column(String(200), nullable=True)  # a combined job: staging … / joining / loading
     cancel_requested: Mapped[bool] = mapped_column(default=False)
     celery_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    owner_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     pipeline_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("pipelines.id", ondelete="SET NULL"), nullable=True)
+    trigger: Mapped[str] = mapped_column(String(20), default="manual")  # manual | schedule ("Started by: schedule")
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -163,7 +176,7 @@ class ServiceCheck(Base):
     checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # a run is in progress
 
-    owner_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -202,7 +215,7 @@ class Pipeline(Base):
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_check_note: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
-    owner_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -250,7 +263,7 @@ class Comparison(Base):
     cancel_requested: Mapped[bool] = mapped_column(default=False)
     celery_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     job_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)  # the load it verifies, when started from a job
-    owner_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

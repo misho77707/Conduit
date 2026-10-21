@@ -9,11 +9,11 @@ from fastapi.concurrency import run_in_threadpool
 
 from ..config import get_settings
 from ..connectors.paths import PathNotAllowed, resolve_allowed
-from ..deps import current_user
+from ..deps import admin_only
 from ..files import FileInspection, UnsupportedFormat, detect_format, inspect_file, split_compression
 from ..schemas import FileEntryOut, FileInspectIn, FileInspectOut
 
-router = APIRouter(prefix="/files", tags=["files"], dependencies=[Depends(current_user)])
+router = APIRouter(prefix="/files", tags=["files"], dependencies=[Depends(admin_only)])
 
 
 @router.post("/inspect", response_model=FileInspectOut)

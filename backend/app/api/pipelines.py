@@ -8,7 +8,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ..db import get_session
-from ..deps import current_user
+from ..deps import admin_only, viewer_ok
 from ..engine import joblog
 from ..engine.arrowconv import _jsonable
 from ..engine.model import ReadRequest
@@ -64,7 +64,7 @@ def _check_schedule(schedule: str | None) -> None:
             raise HTTPException(422, str(e)) from e
 
 
-@router.get("", dependencies=[Depends(current_user)])
+@router.get("", dependencies=[Depends(viewer_ok)])
 def list_pipelines(session: Session = Depends(get_session)) -> list[PipelineOut]:
     pipes = list(session.scalars(select(Pipeline).order_by(Pipeline.created_at)))
     job_ids = [p.last_job_id for p in pipes if p.last_job_id]
@@ -72,7 +72,7 @@ def list_pipelines(session: Session = Depends(get_session)) -> list[PipelineOut]
     return [_out(p, jobs.get(p.last_job_id)) for p in pipes]
 
 
-@router.post("", status_code=status.HTTP_201_CREATED, dependencies=[Depends(current_user)])
+@router.post("", status_code=status.HTTP_201_CREATED, dependencies=[Depends(admin_only)])
 def create_pipeline(body: PipelineIn, session: Session = Depends(get_session)) -> PipelineOut:
     _validate_shape(body.source, body.target, body.options, body.steps)
     _check_connections(session, body.source, body.target)
@@ -89,14 +89,14 @@ def create_pipeline(body: PipelineIn, session: Session = Depends(get_session)) -
     return _out(p, None)
 
 
-@router.get("/{pipeline_id}", dependencies=[Depends(current_user)])
+@router.get("/{pipeline_id}", dependencies=[Depends(admin_only)])
 def get_pipeline(pipeline_id: uuid.UUID, session: Session = Depends(get_session)) -> PipelineOut:
     p = _pipeline_or_404(session, pipeline_id)
     last_job = session.get(Job, p.last_job_id) if p.last_job_id else None
     return _out(p, last_job)
 
 
-@router.patch("/{pipeline_id}", dependencies=[Depends(current_user)])
+@router.patch("/{pipeline_id}", dependencies=[Depends(admin_only)])
 def update_pipeline(pipeline_id: uuid.UUID, body: PipelinePatch, session: Session = Depends(get_session)) -> PipelineOut:
     p = _pipeline_or_404(session, pipeline_id)
     data = body.model_dump(exclude_unset=True)
@@ -122,7 +122,7 @@ def update_pipeline(pipeline_id: uuid.UUID, body: PipelinePatch, session: Sessio
     return _out(p, last_job)
 
 
-@router.delete("/{pipeline_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(current_user)])
+@router.delete("/{pipeline_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(admin_only)])
 def delete_pipeline(pipeline_id: uuid.UUID, session: Session = Depends(get_session)) -> None:
     p = _pipeline_or_404(session, pipeline_id)
     # a combined source's watermarks are keyed by the pipeline ("pipeline:<id>:<driver>"): they go with it
@@ -244,7 +244,7 @@ def _apply_steps_preview(p: Pipeline, table: pa.Table, sample_rows: int, upto_st
             "sampled_rows": table.num_rows, "full_chain": full_chain, "error": error, "error_step": error_step, **extra}
 
 
-@router.post("/{pipeline_id}/preview", dependencies=[Depends(current_user)])
+@router.post("/{pipeline_id}/preview", dependencies=[Depends(admin_only)])
 async def preview_pipeline(pipeline_id: uuid.UUID, body: PipelinePreviewIn,
                            session: Session = Depends(get_session)) -> PipelinePreviewOut:
     p = _pipeline_or_404(session, pipeline_id)
@@ -309,7 +309,7 @@ def _run(session: Session, p: Pipeline, user: User) -> dict[str, Any]:
     return snapshot(job)
 
 
-@router.post("/{pipeline_id}/run", dependencies=[Depends(current_user)])
-def run_pipeline(pipeline_id: uuid.UUID, session: Session = Depends(get_session), user: User = Depends(current_user)) -> dict:
+@router.post("/{pipeline_id}/run", dependencies=[Depends(admin_only)])
+def run_pipeline(pipeline_id: uuid.UUID, session: Session = Depends(get_session), user: User = Depends(admin_only)) -> dict:
     p = _pipeline_or_404(session, pipeline_id)
     return _run(session, p, user)

@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..db import get_session
-from ..deps import current_user
+from ..deps import admin_only, viewer_ok
 from ..engine.runner import snapshot as job_snapshot
 from ..models import Connection, Job, ServiceCheck, User, utcnow
 from ..monitor import checks as chk
@@ -23,7 +23,7 @@ from ..monitor import host
 from ..connectors import category_of
 from ..services import all_connections, serialize, test_many
 
-router = APIRouter(prefix="/monitor", tags=["monitor"], dependencies=[Depends(current_user)])
+router = APIRouter(prefix="/monitor", tags=["monitor"])
 
 MIN_INTERVAL_S, MAX_INTERVAL_S = 10, 3600
 _NO_SQL = ("mongodb",)  # query checks need a SQL database
@@ -145,14 +145,14 @@ def _get_check(session: Session, check_id: uuid.UUID) -> ServiceCheck:
 
 # ---- service checks -------------------------------------------------------------------------------------------
 
-@router.get("/checks", response_model=list[CheckOut])
+@router.get("/checks", response_model=list[CheckOut], dependencies=[Depends(admin_only)])
 def list_checks(session: Session = Depends(get_session)) -> list[CheckOut]:
     names = _names(session)
     return [_out(c, names) for c in session.scalars(select(ServiceCheck).order_by(ServiceCheck.created_at))]
 
 
 @router.post("/checks", response_model=CheckOut, status_code=status.HTTP_201_CREATED)
-def create_check(body: CheckIn, session: Session = Depends(get_session), user: User = Depends(current_user)) -> CheckOut:
+def create_check(body: CheckIn, session: Session = Depends(get_session), user: User = Depends(admin_only)) -> CheckOut:
     if body.kind == "query":
         _validated_connection(session, body.connection_id)
     c = ServiceCheck(name=body.name, kind=body.kind, target=body.target, connection_id=body.connection_id if body.kind == "query" else None,
@@ -165,7 +165,7 @@ def create_check(body: CheckIn, session: Session = Depends(get_session), user: U
     return _out(c, _names(session))
 
 
-@router.patch("/checks/{check_id}", response_model=CheckOut)
+@router.patch("/checks/{check_id}", response_model=CheckOut, dependencies=[Depends(admin_only)])
 def update_check(check_id: uuid.UUID, body: CheckPatch, session: Session = Depends(get_session)) -> CheckOut:
     c = _get_check(session, check_id)
     data = body.model_dump(exclude_unset=True)
@@ -187,13 +187,13 @@ def update_check(check_id: uuid.UUID, body: CheckPatch, session: Session = Depen
     return _out(c, _names(session))
 
 
-@router.delete("/checks/{check_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/checks/{check_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(admin_only)])
 def delete_check(check_id: uuid.UUID, session: Session = Depends(get_session)) -> None:
     session.delete(_get_check(session, check_id))
     session.commit()
 
 
-@router.post("/checks/{check_id}/run", response_model=CheckOut)
+@router.post("/checks/{check_id}/run", response_model=CheckOut, dependencies=[Depends(admin_only)])
 def run_check_now(check_id: uuid.UUID, session: Session = Depends(get_session)) -> CheckOut:
     c = _get_check(session, check_id)
     if not chk.run_and_store(c.id):
@@ -254,7 +254,7 @@ def build_snapshot(session: Session) -> dict:
     }
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(viewer_ok)])
 def monitor(session: Session = Depends(get_session)) -> dict:
     """Everything the Monitor screen shows, in one call. Poll it every few seconds."""
     return _jsonable(build_snapshot(session))
@@ -273,7 +273,7 @@ def _refresh(session: Session) -> dict:
     return _jsonable(build_snapshot(session))
 
 
-@router.post("/refresh")
+@router.post("/refresh", dependencies=[Depends(admin_only)])
 async def refresh(session: Session = Depends(get_session)) -> dict:
     """Test every connection and run every service check now, then return the fresh snapshot."""
     return await run_in_threadpool(_refresh, session)
