@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { usersApi, ApiError, type Role, type UserAdminOut } from "../lib/api";
+import { usersApi, ApiError, sessionEnded, type Role, type UserAdminOut } from "../lib/api";
 import { ROLE_LABEL, useAuth } from "../lib/auth";
 import { useToast } from "../lib/toast";
 import { relativeTime } from "../lib/format";
@@ -32,7 +32,7 @@ export function Users() {
   const [roleOf, setRoleOf] = useState<UserAdminOut | null>(null);
   const [resetOf, setResetOf] = useState<UserAdminOut | null>(null);
 
-  const load = () => usersApi.list().then(setUsers).catch((e) => toast("err", "Could not load users", e instanceof Error ? e.message : undefined));
+  const load = () => usersApi.list().then(setUsers).catch((e) => sessionEnded(e) || toast("err", "Could not load users", e instanceof Error ? e.message : undefined));
   useEffect(() => { load(); }, []);
 
   if (!users) return null;

@@ -15,6 +15,8 @@ to set it (`pages/pipelines/ScheduleModal.tsx`) — all reusing the same load en
 **Remote intake** too: files on S3 (or MinIO / R2 / Wasabi), SFTP or behind a URL load anywhere a local file
 can (wizard, pipelines including schedules, Compare), one file / the newest match / all matches, with
 skip-already-loaded; `.gz` and `.zip` work for local and remote files alike.
+**Users and roles**: superadmins manage accounts; admins do everything else; viewers only look (Monitor,
+Jobs, the pipeline list, comparison counts), enforced by the API on every route.
 Not yet built: a watched folder, Avro/ORC, and Control & Setup.
 
 ## Run it
@@ -30,8 +32,10 @@ docker compose up --build
 ```
 
 - App: http://localhost:5173 · API + docs: http://localhost:8000/docs
-- Admin login: user `admin`; the password is `CONDUIT_ADMIN_PASSWORD`, or if you left it empty a random one
-  is printed once: `docker compose logs api | grep "generated password"`
+- First sign-in: user `admin` (`CONDUIT_ADMIN_USER`), a **superadmin**. The password is `CONDUIT_ADMIN_PASSWORD`,
+  or, if you left it empty, a temporary one printed once (`docker compose logs api | grep "generated password"`)
+  that you replace at that first sign-in. Both variables are read only while the users table is empty: after
+  that, add and manage people on the **Users** screen (see Users and roles).
 - Files for SQLite/DuckDB connections, uploads and reject files live in `./data` (mounted at `/data`).
   File connections and file loads can only open paths inside `/data`. The containers run as uid/gid 1000
   (the WSL default); if `ls -n data` shows another owner, set `CONDUIT_UID` / `CONDUIT_GID` in `.env`.
@@ -40,7 +44,10 @@ docker compose up --build
 
 ```
 backend/app/
-  main.py            FastAPI app, first-run admin seeding
+  main.py            FastAPI app, first-run superadmin seeding (bootstrap.py)
+  deps.py            who is calling and may they: the permission every route declares (see Users and roles)
+  users.py           password and username rules, the last-superadmin rule, deleting a user but not their work
+  labels.py          readable source / target names ("orders (prod-pg)") for screens that don't get the spec
   config.py          settings (env vars, prefix CONDUIT_)
   security.py        scrypt passwords, JWT, Fernet credential encryption
   models.py          users, connections (current health state lives on the row), jobs, service checks
@@ -48,7 +55,7 @@ backend/app/
   files.py           file inspect: columns, row estimate, preview (DuckDB + openpyxl); .gz / .zip handling
   remote.py          remote intake: matching, skip-loaded, previews, per-job downloads (manifest), Compare downloads
   filecache.py       size-capped LRU cache for previews / unpacked archives, and the free-disk-space check
-  api/               auth, connections, files, jobs, monitor, pipelines
+  api/               auth, users, connections, files, jobs, monitor, pipelines, compare, remote
   connectors/        one class per database: connect, test, inspect (base.py is the interface); S3 / SFTP /
                      HTTP are "storage" connectors with one filesystem interface (storage.py)
   engine/            the load engine
@@ -75,7 +82,8 @@ frontend/src/
   lib/               api.ts (typed client), auth.tsx, theme.tsx, toast.tsx, format.ts, highlight.ts
   ui/                Button, Input, Card, Modal, Badge, ProgressBar, SegmentedControl, Toggle ...
   shell/             AppShell (header + collapsible sidebar), Logo
-  pages/             Login, Connections (+ AddConnectionModal, also used to edit), Jobs (+ jobs/JobDetail, SSE-driven),
+  pages/             Login, Users (superadmins), account/Password (change password, the forced "set a new password"),
+                     Connections (+ AddConnectionModal, also used to edit), Jobs (+ jobs/JobDetail, SSE-driven),
                      Monitor (+ monitor/ServiceCheckModal), Pipelines (+ pipelines/*), ComingSoon (Control)
     upload/          the 4-step wizard: Wizard, Step1Source .. Step4Review, jobBuilder.ts (state -> JobIn)
     pipelines/       Builder (3-column: steps sidebar, step editor, live preview), NewPipelineModal,
@@ -91,7 +99,12 @@ frontend/design/      the original Claude Design prototype (reference only, not 
 | Method | Path | Purpose |
 |---|---|---|
 | POST | /auth/login | username + password, returns token |
-| GET | /auth/me | current user |
+| GET | /auth/me | current user: role, `must_change_password` |
+| POST | /auth/password | `{current_password, new_password}`: change your own password (every role); returns a fresh token, your other sessions end |
+| GET/POST | /users | superadmin: list (with created by, last sign-in) / add `{username, role, temporary_password}` (409: the name is taken, ignoring case) |
+| PATCH | /users/{id} | superadmin: `{role?, is_active?}` (409 if no active superadmin would be left) |
+| POST | /users/{id}/reset-password | superadmin: `{temporary_password}`; the user's sessions end and they must set their own password |
+| DELETE | /users/{id} | superadmin: delete (409 for the last active superadmin); their connections, pipelines and jobs stay |
 | GET | /meta/db-types | database types for the add-connection flow |
 | GET/POST | /connections | list / create |
 | POST | /connections/test | test unsaved settings |
@@ -134,7 +147,61 @@ frontend/design/      the original Claude Design prototype (reference only, not 
 | GET | /health | liveness + app DB check |
 
 Secrets (passwords, MongoDB URIs) are encrypted with `CONDUIT_SECRET_KEY` and never returned.
-Passwords omitted on `PATCH` keep their stored value.
+Passwords omitted on `PATCH` keep their stored value. Which role may call which route: see Users and roles.
+
+## Users and roles
+
+| Role | Can |
+|---|---|
+| **superadmin** | everything an admin can, plus the **Users** screen: add users, change roles, reset passwords, deactivate / reactivate, delete |
+| **admin** | everything else, as the single admin always could: connections, uploads and loads, jobs, pipelines and schedules, Compare, Monitor (checks, refresh) |
+| **viewer** | look, not touch: Monitor (each connection's health only: name, type, status, latency, last check, note; service checks without query SQL), Jobs (status, live progress, errors, the log), the pipeline list (labels, step count, last run, schedule), comparisons (status and counts). No data rows (reject files, previews, dry-run samples, comparison rows or exports), no Connections page, no changes of any kind besides their own password |
+
+Admins and superadmins share one workspace: everyone sees and edits every connection, pipeline and job.
+`owner_id` is informational ("Created by" on pipelines, "Started by" on jobs). There are no per-connection
+permissions.
+
+**Enforced by the API, not the screens.** Every `/api` route but login and health declares one permission
+(`app/deps.py`: `self_service`, `viewer_ok`, `admin_only`, `superadmin_only`), checked against the role stored on
+the user row (never the token's own claim). `tests/test_permissions.py` holds the whole table: a route
+without a permission, or with another one than the table says, fails the suite, and a viewer is shown to get
+403 from every route above it. The frontend only hides what a role can't use; a viewer who opens
+`#/connections` lands on Monitor, and the API would refuse the calls anyway. Where viewers may read, the API
+itself trims the answer: job detail without its spec (no SQL or WHERE; labels like
+`orders (prod-pg) → public.orders (ch)` instead) and of the plan only its notes, comparisons without their spec,
+the Monitor as above. The pipeline list is a short shape for every role; the full pipeline is
+`GET /pipelines/{id}` (admins).
+
+**Passwords.** A superadmin adds a user with a temporary password (the screen offers a generated one and shows
+it once to copy); resetting a password sets a new temporary one. Until the user replaces it, every route but
+`/auth/me` and `/auth/password` answers 403 `{"code": "password_change_required"}`, and the app shows only
+"Set a new password". Passwords: at least 10 characters, not the username, not the current one.
+
+**Sessions.** A token carries the user's `token_version`; changing or resetting a password, changing the role
+and deactivating bump it, so the user's other sessions end at their next request (open job streams stop too).
+Login keeps its throttle (10 failures in 5 minutes per address) and records the last sign-in. A deactivated user
+gets the same "Invalid username or password" as a wrong password.
+
+**The last superadmin.** There is always one active superadmin: demoting, deactivating or deleting the last
+one is refused (409, with the reason), also when they do it to themselves. The Users screen shows it (a "last
+superadmin" mark; those actions are disabled with the reason as a tooltip).
+
+**Deleting a user** keeps their work: their connections, jobs, pipelines, service checks and comparisons stay,
+unowned (`owner_id` is cleared; the foreign keys are `ON DELETE SET NULL` as a second guard), as do the users
+they created.
+
+**Scheduled runs** run as the pipeline's owner while that owner is an active admin or superadmin, otherwise as
+the longest-standing active superadmin (then admin): never a viewer or a deactivated account, so deactivating
+someone never stops the schedules. The job says "Started by: schedule".
+
+**Upgrading a single-admin install** (migration `0009_roles`): the existing admin becomes a superadmin; on an
+install with a single user, the pipelines (which never recorded an owner) and anything else without one become
+theirs. Jobs from before the upgrade show who owned them, even scheduled ones (the trigger wasn't recorded).
+
+**Limits.** Local accounts only: no SSO / LDAP, no two-factor sign-in, no per-connection or per-pipeline
+permissions, and no audit log (who changed what is not kept; the Users list shows who created a user and their
+last sign-in). Viewers see the names of connections, tables and files in labels and job logs, and job errors as
+they are.
 
 ## Notes
 
@@ -303,8 +370,9 @@ on its own clock, since an immediate run on save could write to a real target. A
 (`conduit.pipelines.run_due`, every 30 s) queues a job for every pipeline that is enabled, has a
 `schedule`, already has a cached preview (the same guard `/run` enforces manually), and whose
 `next_run_at` has passed, using an optimistic claim (`schedule_claimed_at`, stale after 60 s) so two beat
-ticks never queue the same firing twice. A scheduled run has no request/session user, so it runs as the
-oldest active account (this is a single-admin tool). After every firing — success or failure —
+ticks never queue the same firing twice. A scheduled run has no request/session user: it runs as the pipeline's
+owner while they are an active admin or superadmin, else as the longest-standing active superadmin (see Users
+and roles), and the job is marked as started by the schedule. After every firing — success or failure —
 `next_run_at` is recomputed from the cron expression, so a broken pipeline just waits for its next slot
 instead of retrying every tick; check the pipeline's `last_run` (or the Jobs list) to see whether a
 scheduled firing actually succeeded.
@@ -751,3 +819,27 @@ celery -A app.worker.celery_app beat --loglevel=info
   the overlap was never read, as documented. **Not verified live**: remote-file, MongoDB and MySQL inputs (tests
   only: CSV inputs, mongomock), the disk floor tripping on a real disk, and a stream lookup over its caps on a real
   server (both in tests).
+- **Users and roles** were verified live on a separate copy of a real install (its app database dumped and
+  restored into a second compose project, so `0009_roles` ran on PostgreSQL with real jobs, pipelines,
+  connections and comparisons): the single admin became a superadmin and the pipelines got their owner. In
+  headless Chrome windows with fresh profiles (the browser extension wasn't connected in that session):
+  - the superadmin added an admin and a viewer, with generated temporary passwords copied from the screen;
+  - the last-superadmin actions showed as disabled with the reason;
+  - both new users got "Set a new password" first and then their own home screen (Connections, Monitor);
+  - the admin opened every screen, and `#/users` sent them back;
+  - the viewer saw Monitor, Jobs, Pipelines and Compare without a single action button, export or reject
+    link, and every hidden URL (`#/connections`, `#/upload`, `#/users`, a pipeline's builder, `#/control`)
+    landed on Monitor;
+  - the viewer's own token got 403 from the API for connections, users, Monitor refresh, a reject file, a
+    pipeline preview and detail, comparison rows, a job retry and a file inspect (seen in the browser's network
+    log);
+  - resetting the viewer's password while they were signed in ended their session within 2 seconds, with a
+    "Your session ended" notice;
+  - deactivating the admin did the same to theirs;
+  - a `* * * * *` pipeline that admin had created kept firing after they were deactivated, started by the
+    schedule.
+
+  No console errors, apart from the browser's own log line for the 401 that ends a session (and the 403s
+  provoked on purpose). **Not verified live**: the first-run seeding with a generated password on an empty
+  database (tests only), and signing in as the migrated admin with their own password (it was checked with a
+  token the app minted for that account).

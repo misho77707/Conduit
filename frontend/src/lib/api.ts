@@ -48,6 +48,9 @@ function detailCode(body: unknown): string | null {
 // anything else (403 password_change_required). lib/auth.tsx listens and routes accordingly.
 export type SessionEvent = "signed_out" | "password_change_required";
 const sessionListeners = new Set<(e: SessionEvent) => void>();
+/** A 401 means the session ended: lib/auth.tsx already says so, so screens don't add their own error toast. */
+export const sessionEnded = (e: unknown) => e instanceof ApiError && e.status === 401;
+
 export function onSessionEvent(fn: (e: SessionEvent) => void): () => void {
   sessionListeners.add(fn);
   return () => { sessionListeners.delete(fn); };

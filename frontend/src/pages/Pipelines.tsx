@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { connectionsApi, pipelinesApi, type ConnectionOut, type PipelineBriefOut } from "../lib/api";
+import { connectionsApi, pipelinesApi, sessionEnded, type ConnectionOut, type PipelineBriefOut } from "../lib/api";
 import { useCan } from "../lib/auth";
 import { useToast } from "../lib/toast";
 import { cronLabel, relativeTime, statusBadge, untilTime } from "../lib/format";
@@ -34,7 +34,7 @@ export function Pipelines() {
   const [conns, setConns] = useState<ConnectionOut[]>([]); // for the New pipeline dialog (admins)
   const [addOpen, setAddOpen] = useState(false);
 
-  const load = () => pipelinesApi.list().then(setPipes).catch(() => toast("err", "Could not load pipelines"));
+  const load = () => pipelinesApi.list().then(setPipes).catch((e) => sessionEnded(e) || toast("err", "Could not load pipelines"));
 
   useEffect(() => {
     load();

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { connectionsApi, metaApi, type ConnectionOut, type DbTypeOut } from "../lib/api";
+import { connectionsApi, metaApi, sessionEnded, type ConnectionOut, type DbTypeOut } from "../lib/api";
 import { useTheme } from "../lib/theme";
 import { useToast } from "../lib/toast";
 import { dbTile, relativeTime, statusBadge } from "../lib/format";
@@ -25,7 +25,7 @@ export function Connections() {
   const [addOpen, setAddOpen] = useState(false);
   const [editing, setEditing] = useState<ConnectionOut | null>(null);
 
-  const load = () => connectionsApi.list().then(setConns).catch(() => toast("err", "Could not load connections"));
+  const load = () => connectionsApi.list().then(setConns).catch((e) => sessionEnded(e) || toast("err", "Could not load connections"));
 
   useEffect(() => {
     load();

@@ -17,7 +17,7 @@ export function Jobs() {
   const { id } = useParams();
   const [jobs, setJobs] = useState<JobSnapshot[] | null>(null);
 
-  const load = () => jobsApi.list().then(setJobs);
+  const load = () => jobsApi.list().then(setJobs).catch(() => {});  // a failed poll keeps the last list
 
   useEffect(() => {
     load();
