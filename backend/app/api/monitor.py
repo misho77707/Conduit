@@ -15,7 +15,8 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..db import get_session
-from ..deps import admin_only, viewer_ok
+from ..connectors.http import mask_url
+from ..deps import admin_only, is_viewer, viewer_ok
 from ..engine.runner import snapshot as job_snapshot
 from ..models import Connection, Job, ServiceCheck, User, utcnow
 from ..monitor import checks as chk
@@ -120,6 +121,19 @@ def _out(c: ServiceCheck, conn_names: dict[uuid.UUID, str]) -> CheckOut:
     return CheckOut(id=c.id, name=c.name, kind=c.kind, target=target, connection_id=c.connection_id, query=c.query,
                     expect=c.expect, interval_s=c.interval_s, verify_tls=c.verify_tls, enabled=c.enabled, status=c.status,
                     message=c.message, latency_ms=c.latency_ms, checked_at=c.checked_at, stale=_stale(c))
+
+
+# What a viewer sees of a connection on the Monitor: its health, not where it is or how it is set up
+VIEWER_CONNECTION_FIELDS = ("id", "name", "type", "status", "latency_ms", "last_checked_at", "note")
+
+
+def _viewer_check(c: ServiceCheck, conn_names: dict[uuid.UUID, str]) -> dict:
+    """A check as a viewer sees it: no SQL of a query check, a URL without its query string."""
+    out = _out(c, conn_names).model_dump(mode="json")
+    target = {"query": f"{conn_names.get(c.connection_id, 'deleted connection')} · query",
+              "http": mask_url(c.target)}.get(c.kind, c.target)
+    out.update(target=target, query=None, connection_id=None)
+    return out
 
 
 def _names(session: Session) -> dict[uuid.UUID, str]:
@@ -227,7 +241,7 @@ def worker_slots() -> tuple[int | None, bool | None]:
     return val
 
 
-def build_snapshot(session: Session) -> dict:
+def build_snapshot(session: Session, viewer: bool = False) -> dict:
     conns = [serialize(c) for c in all_connections(session)]
     jobs = list(session.scalars(select(Job).where(Job.status.in_(("queued", "planning", "running"))).order_by(Job.created_at)))
     active = [j for j in jobs if j.status in ("planning", "running")]
@@ -238,13 +252,14 @@ def build_snapshot(session: Session) -> dict:
     n = lambda seq, key, val: sum(1 for x in seq if getattr(x, key) == val)  # noqa: E731
     return {
         "updated_at": utcnow(),
-        "connections": [c.model_dump(mode="json") for c in conns],
+        "connections": [{k: v for k, v in c.model_dump(mode="json").items() if not viewer or k in VIEWER_CONNECTION_FIELDS}
+                        for c in conns],
         "host": host.snapshot(),
         "jobs": {
             "running": len(active), "queued": len(jobs) - len(active), "slots_total": slots_total, "worker_online": online,
             "active": [job_snapshot(j) for j in active],
         },
-        "services": [s.model_dump(mode="json") for s in services],
+        "services": [_viewer_check(c, names) for c in check_rows] if viewer else [s.model_dump(mode="json") for s in services],
         "summary": {
             "connections": {"up": n(conns, "status", "ok"), "warn": n(conns, "status", "warn"), "down": n(conns, "status", "err"),
                             "unchecked": n(conns, "status", "idle"), "total": len(conns)},
@@ -254,10 +269,11 @@ def build_snapshot(session: Session) -> dict:
     }
 
 
-@router.get("", dependencies=[Depends(viewer_ok)])
-def monitor(session: Session = Depends(get_session)) -> dict:
-    """Everything the Monitor screen shows, in one call. Poll it every few seconds."""
-    return _jsonable(build_snapshot(session))
+@router.get("")
+def monitor(session: Session = Depends(get_session), user: User = Depends(viewer_ok)) -> dict:
+    """Everything the Monitor screen shows, in one call. Poll it every few seconds. A viewer gets each connection's
+    health only, and service checks without query SQL."""
+    return _jsonable(build_snapshot(session, viewer=is_viewer(user)))
 
 
 def _jsonable(obj):

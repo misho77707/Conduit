@@ -21,7 +21,9 @@ from ..engine.steps import StepError, apply_steps, compile_steps, infer_colspecs
 from ..engine.types import to_arrow
 from ..connectors import category_of
 from ..models import Connection, Job, Pipeline, User, Watermark, utcnow
-from ..schemas import PipelineIn, PipelineLastRunOut, PipelineOut, PipelinePatch, PipelinePreviewIn, PipelinePreviewOut
+from ..labels import connection_names, source_label, target_label, usernames
+from ..schemas import (PipelineBriefOut, PipelineIn, PipelineLastRunOut, PipelineOut, PipelinePatch, PipelinePreviewIn,
+                       PipelinePreviewOut)
 from .jobs import _dispatch
 
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
@@ -34,11 +36,27 @@ def _pipeline_or_404(session: Session, pipeline_id: uuid.UUID) -> Pipeline:
     return p
 
 
+def _last_run(last_job: Job | None) -> PipelineLastRunOut | None:
+    if last_job is None:
+        return None
+    return PipelineLastRunOut(job_id=last_job.id, status=last_job.status, rows_written=last_job.rows_written,
+                              started_at=last_job.started_at, finished_at=last_job.finished_at, error=last_job.error)
+
+
+def _brief(p: Pipeline, last_job: Job | None, conns: dict[str, str], names: dict[uuid.UUID, str]) -> PipelineBriefOut:
+    s = p.source or {}
+    kind = next((k for k in ("combined", "remote", "file", "query") if s.get(k)), "table")
+    runnable = bool(p.output_columns) and (not s.get("combined") or bool(p.source_columns))
+    return PipelineBriefOut(id=p.id, name=p.name, description=p.description, source_kind=kind,
+                            source_label=source_label(s, conns), target_label=target_label(p.target, conns),
+                            step_count=len(p.steps or []), runnable=runnable, schedule=p.schedule, enabled=p.enabled,
+                            next_run_at=p.next_run_at, last_run=_last_run(last_job), last_checked_at=p.last_checked_at,
+                            last_check_note=p.last_check_note, created_by=names.get(p.owner_id) if p.owner_id else None,
+                            created_at=p.created_at, updated_at=p.updated_at)
+
+
 def _out(p: Pipeline, last_job: Job | None) -> PipelineOut:
-    last_run = None
-    if last_job is not None:
-        last_run = PipelineLastRunOut(job_id=last_job.id, status=last_job.status, rows_written=last_job.rows_written,
-                                      started_at=last_job.started_at, finished_at=last_job.finished_at, error=last_job.error)
+    last_run = _last_run(last_job)
     return PipelineOut(id=p.id, name=p.name, description=p.description, source=p.source, target=p.target,
                        options=p.options, steps=p.steps, output_columns=p.output_columns, source_columns=p.source_columns,
                        schedule=p.schedule,
@@ -65,11 +83,13 @@ def _check_schedule(schedule: str | None) -> None:
 
 
 @router.get("", dependencies=[Depends(viewer_ok)])
-def list_pipelines(session: Session = Depends(get_session)) -> list[PipelineOut]:
+def list_pipelines(session: Session = Depends(get_session)) -> list[PipelineBriefOut]:
+    """The list, for every role: labels instead of the source / target spec, a step count instead of the steps."""
     pipes = list(session.scalars(select(Pipeline).order_by(Pipeline.created_at)))
     job_ids = [p.last_job_id for p in pipes if p.last_job_id]
     jobs = {j.id: j for j in session.scalars(select(Job).where(Job.id.in_(job_ids)))} if job_ids else {}
-    return [_out(p, jobs.get(p.last_job_id)) for p in pipes]
+    conns, names = connection_names(session), usernames(session)
+    return [_brief(p, jobs.get(p.last_job_id), conns, names) for p in pipes]
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)

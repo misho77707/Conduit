@@ -17,7 +17,8 @@ from ..compare.engine import FINISHED, describe, folder, is_stalled, resolve, ru
 from ..compare.spec import CompareIn, SidesIn
 from ..config import get_settings
 from ..db import get_session
-from ..deps import admin_only, viewer_ok
+from ..deps import admin_only, is_viewer, viewer_ok
+from ..labels import connection_names, source_label
 from ..engine.runner import JobError, short_error
 from ..engine.sources import SourceUnavailable
 from ..models import Comparison, User, utcnow
@@ -82,14 +83,25 @@ async def create(body: CompareIn, session: Session = Depends(get_session), user:
     return snapshot(c)
 
 
-@router.get("", dependencies=[Depends(viewer_ok)])
-def list_comparisons(session: Session = Depends(get_session)) -> list[dict]:
-    return [snapshot(c) for c in session.scalars(select(Comparison).order_by(Comparison.created_at.desc()).limit(50))]
+def _view(c: Comparison, conns: dict[str, str], viewer: bool) -> dict[str, Any]:
+    """A comparison with readable side labels; a viewer gets no spec (SQL, WHERE, paths), only status and counts."""
+    out = snapshot(c)
+    spec = c.spec or {}
+    out["source_label"], out["target_label"] = source_label(spec.get("source"), conns), source_label(spec.get("target"), conns)
+    if viewer:
+        out["spec"] = None
+    return out
 
 
-@router.get("/{cid}", dependencies=[Depends(viewer_ok)])
-def get_comparison(cid: uuid.UUID, session: Session = Depends(get_session)) -> dict:
-    return snapshot(_or_404(session, cid))
+@router.get("")
+def list_comparisons(session: Session = Depends(get_session), user: User = Depends(viewer_ok)) -> list[dict]:
+    conns, viewer = connection_names(session), is_viewer(user)
+    return [_view(c, conns, viewer) for c in session.scalars(select(Comparison).order_by(Comparison.created_at.desc()).limit(50))]
+
+
+@router.get("/{cid}")
+def get_comparison(cid: uuid.UUID, session: Session = Depends(get_session), user: User = Depends(viewer_ok)) -> dict:
+    return _view(_or_404(session, cid), connection_names(session), is_viewer(user))
 
 
 def _finished(c: Comparison) -> dict[str, Any]:

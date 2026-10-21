@@ -236,6 +236,28 @@ class PipelineOut(BaseModel):
     last_check_note: str | None = None
 
 
+class PipelineBriefOut(BaseModel):
+    """GET /pipelines (every role): what the list shows. The source, steps and target are on GET /pipelines/{id}."""
+
+    id: uuid.UUID
+    name: str
+    description: str
+    source_kind: Literal["table", "query", "file", "remote", "combined"]
+    source_label: str  # e.g. "orders (prod-pg)", "events (prod-ch) + users (prod-pg)", "orders_*.csv (minio)"
+    target_label: str  # e.g. "public.orders (ch)"
+    step_count: int
+    runnable: bool  # a full preview cached the schema /run and the scheduler need
+    schedule: str | None
+    enabled: bool
+    next_run_at: datetime | None = None
+    last_run: PipelineLastRunOut | None = None
+    last_checked_at: datetime | None = None
+    last_check_note: str | None = None
+    created_by: str | None  # None: created before owners were recorded, or by a deleted user
+    created_at: datetime
+    updated_at: datetime
+
+
 class PipelinePreviewIn(BaseModel):
     sample_rows: int = Field(default=50, ge=1, le=2000)
     upto_step: str | None = None  # apply steps up to and including this step id; None = the whole chain

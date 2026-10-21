@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..db import get_session, get_sessionmaker
-from ..deps import admin_only, viewer_ok, viewer_ok_sse
+from ..deps import admin_only, is_viewer, viewer_ok, viewer_ok_sse
 from ..engine import joblog
 from ..engine.runner import JobError, make_plan, prepare, rejects_path, run_job, short_error, snapshot
 from ..engine.spec import JobIn
@@ -21,6 +21,7 @@ from ..engine.steps import StepError
 from ..remote import display as remote_display
 from ..remote import remove_job_dir
 from ..engine.combined_run import remove_job_dir as remove_combined_dir
+from ..labels import connection_names, source_label, target_label, usernames
 from ..models import Job, JobSplit, User, utcnow
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -108,28 +109,42 @@ def create_job(body: JobIn, session: Session = Depends(get_session), user: User 
     return snapshot(job)
 
 
-@router.get("", dependencies=[Depends(viewer_ok)])
-def list_jobs(session: Session = Depends(get_session)) -> list[dict]:
-    jobs = list(session.scalars(select(Job).order_by(Job.created_at.desc()).limit(50)))
-    order = {"running": 0, "planning": 0, "queued": 1}
-    jobs.sort(key=lambda j: order.get(j.status, 2))
-    return [snapshot(j, []) if j.status not in _ACTIVE else snapshot(j) for j in jobs]
-
-
-def _detail(session: Session, job: Job, log_lines: int = 40) -> dict[str, Any]:
-    splits = list(session.scalars(select(JobSplit).where(JobSplit.job_id == job.id).order_by(JobSplit.idx)))
-    snap = snapshot(job, splits)
-    snap["splits"] = [{"idx": s.idx, "label": s.label, "status": s.status, "est_rows": s.est_rows, "rows_written": s.rows_written,
-                       "rows_rejected": s.rows_rejected, "attempts": s.attempts, "error": s.error} for s in splits]
-    snap["plan"] = job.plan
-    snap["spec"] = job.spec  # the original request, so the wizard can reopen it for editing
-    snap["log"] = joblog.tail(job.id, log_lines)
+def _started(snap: dict[str, Any], job: Job, names: dict[uuid.UUID, str]) -> dict[str, Any]:
+    snap["trigger"] = job.trigger
+    snap["started_by"] = "schedule" if job.trigger == "schedule" else names.get(job.owner_id)  # None: a deleted user
     return snap
 
 
-@router.get("/{job_id}", dependencies=[Depends(viewer_ok)])
-def get_job(job_id: uuid.UUID, session: Session = Depends(get_session)) -> dict:
-    return _detail(session, _job_or_404(session, job_id))
+@router.get("", dependencies=[Depends(viewer_ok)])
+def list_jobs(session: Session = Depends(get_session)) -> list[dict]:
+    """The same for every role: a snapshot holds counters and status, never the job's spec."""
+    jobs = list(session.scalars(select(Job).order_by(Job.created_at.desc()).limit(50)))
+    order = {"running": 0, "planning": 0, "queued": 1}
+    jobs.sort(key=lambda j: order.get(j.status, 2))
+    names = usernames(session)
+    return [_started(snapshot(j, []) if j.status not in _ACTIVE else snapshot(j), j, names) for j in jobs]
+
+
+def _detail(session: Session, job: Job, log_lines: int = 40, viewer: bool = False) -> dict[str, Any]:
+    splits = list(session.scalars(select(JobSplit).where(JobSplit.job_id == job.id).order_by(JobSplit.idx)))
+    snap = _started(snapshot(job, splits), job, usernames(session))
+    snap["splits"] = [{"idx": s.idx, "label": s.label, "status": s.status, "est_rows": s.est_rows, "rows_written": s.rows_written,
+                       "rows_rejected": s.rows_rejected, "attempts": s.attempts, "error": s.error} for s in splits]
+    conns, spec = connection_names(session), job.spec or {}
+    snap["source_label"], snap["target_label"] = source_label(spec.get("source"), conns), target_label(spec.get("target"), conns)
+    snap["log"] = joblog.tail(job.id, log_lines)
+    if viewer:  # no spec (SQL, WHERE, paths), and of the plan only its notes: no sample rows, DDL or columns
+        snap["spec"] = None
+        snap["plan"] = {k: job.plan[k] for k in ("notes", "warnings") if k in job.plan} if job.plan else None
+    else:
+        snap["plan"] = job.plan
+        snap["spec"] = job.spec  # the original request, so the wizard can reopen it for editing
+    return snap
+
+
+@router.get("/{job_id}")
+def get_job(job_id: uuid.UUID, session: Session = Depends(get_session), user: User = Depends(viewer_ok)) -> dict:
+    return _detail(session, _job_or_404(session, job_id), viewer=is_viewer(user))
 
 
 @router.get("/{job_id}/log", dependencies=[Depends(viewer_ok)])
@@ -187,16 +202,22 @@ def download_rejects(job_id: uuid.UUID, session: Session = Depends(get_session))
     return FileResponse(p, media_type="text/csv", filename=f"{job_id}.rejects.csv")
 
 
-def _read_detail(job_id: uuid.UUID) -> dict[str, Any] | None:
+def _read_detail(job_id: uuid.UUID, viewer: bool, session_of: tuple[uuid.UUID, int] | None = None) -> dict[str, Any] | None:
+    """`session_of` (user id, token version): None once that session has ended (password / role change, deactivated)."""
     with get_sessionmaker()() as s:
+        if session_of is not None:
+            u = s.get(User, session_of[0])
+            if u is None or not u.is_active or u.token_version != session_of[1]:
+                return None
         job = s.get(Job, job_id)
-        return _detail(s, job, 15) if job else None
+        return _detail(s, job, 15, viewer) if job else None
 
 
-@router.get("/{job_id}/events", dependencies=[Depends(viewer_ok_sse)])
-async def events(job_id: uuid.UUID) -> StreamingResponse:
+@router.get("/{job_id}/events")
+async def events(job_id: uuid.UUID, user: User = Depends(viewer_ok_sse)) -> StreamingResponse:
     """Server-sent events: the job's state once a second until it finishes. Pass ?token=<jwt> (EventSource cannot set headers)."""
-    first = await run_in_threadpool(_read_detail, job_id)
+    viewer, session_of = is_viewer(user), (user.id, user.token_version)
+    first = await run_in_threadpool(_read_detail, job_id, viewer)
     if first is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found")
 
@@ -208,7 +229,10 @@ async def events(job_id: uuid.UUID) -> StreamingResponse:
                 yield "event: done\ndata: {}\n\n"
                 return
             await asyncio.sleep(1.0)
-            detail = await run_in_threadpool(_read_detail, job_id) or detail
+            detail = await run_in_threadpool(_read_detail, job_id, viewer, session_of)
+            if detail is None:  # the job was deleted, or the user's session ended: stop streaming
+                yield "event: done\ndata: {}\n\n"
+                return
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
