@@ -7,10 +7,12 @@ import { StatusBadge } from "../ui/Badge";
 import { ProgressBar } from "../ui/ProgressBar";
 import { Icon } from "../ui/Icon";
 import { JobDetail } from "./jobs/JobDetail";
+import { useCan } from "../lib/auth";
 
 const ACTIVE = new Set(["queued", "planning", "running"]);
 
 export function Jobs() {
+  const can = useCan();
   const nav = useNavigate();
   const { id } = useParams();
   const [jobs, setJobs] = useState<JobSnapshot[] | null>(null);
@@ -45,7 +47,7 @@ export function Jobs() {
           <h1 style={{ margin: 0, fontSize: 20, fontWeight: 600, letterSpacing: "-0.01em" }}>Jobs</h1>
           <p style={{ margin: "4px 0 0", color: "var(--text-2)" }}>What&rsquo;s running, what&rsquo;s next, and the last result. Conduit doesn&rsquo;t keep a long history.</p>
         </div>
-        <Button variant="primary" icon="add" onClick={() => nav("/upload")}>New load</Button>
+        {can.edit && <Button variant="primary" icon="add" onClick={() => nav("/upload")}>New load</Button>}
       </div>
 
       {jobs.length === 0 ? (
@@ -54,7 +56,7 @@ export function Jobs() {
             <Icon name="bolt" style={{ fontSize: 26 }} />
           </span>
           <div style={{ fontSize: 16, fontWeight: 600 }}>No jobs yet</div>
-          <Button variant="primary" icon="add" onClick={() => nav("/upload")}>Start a load</Button>
+          {can.edit && <Button variant="primary" icon="add" onClick={() => nav("/upload")}>Start a load</Button>}
         </div>
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "minmax(260px,320px) minmax(0,1fr)", gap: 16, alignItems: "start" }}>
@@ -83,6 +85,7 @@ export function Jobs() {
                       <div style={{ fontSize: 11, color: "var(--text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "100%" }}>
                         {active && prePhase(j.phase) ? prePhase(j.phase) : active ? `${pct.toFixed(1)}% · ${fmtN(j.rows_written)} rows` : j.finished_at ? `finished · ${relativeTime(j.finished_at)}` : relativeTime(j.created_at)}
                         {j.status === "running" && j.eta_s != null ? ` · ~${fmtEta(j.eta_s)} left` : ""}
+                        {j.started_by ? ` · by ${j.started_by}` : ""}
                       </div>
                     </button>
                   );

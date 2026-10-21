@@ -9,6 +9,7 @@ export interface RowMenuItem {
   onClick: () => void;
   tone?: string; // text colour, e.g. "var(--err)" for Delete
   disabled?: boolean;
+  hint?: string; // tooltip; for a disabled item, why it is
 }
 
 const ITEM_H = 30, PAD = 4;
@@ -55,8 +56,8 @@ export function RowMenu({ items, width = 160, size = 28, title = "More" }: { ite
           <div role="menu" style={{ position: "fixed", left: pos.left, top: pos.top, width, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, boxShadow: "var(--shadow-2)", padding: PAD, zIndex: 50, display: "flex", flexDirection: "column" }}>
             {items.map((it) => (
               <button
-                key={it.label} role="menuitem" disabled={it.disabled}
-                onClick={() => { setPos(null); it.onClick(); }}
+                key={it.label} role="menuitem" aria-disabled={it.disabled || undefined} title={it.hint}
+                onClick={() => { if (it.disabled) return; setPos(null); it.onClick(); }}
                 className="hover-surface2"
                 style={{ height: ITEM_H, width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "0 8px", border: "none", background: "transparent", borderRadius: 5, cursor: it.disabled ? "default" : "pointer", textAlign: "left", color: it.disabled ? "var(--text-3)" : it.tone || "var(--text-2)", whiteSpace: "nowrap" }}
               >

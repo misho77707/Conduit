@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { monitorApi, type CheckOut, type MonitorSnapshot } from "../lib/api";
 import { useToast } from "../lib/toast";
+import { useCan } from "../lib/auth";
 import { useTheme } from "../lib/theme";
 import { dbTile, fmtEta, fmtN, relativeTime, statusBadge } from "../lib/format";
 import { Icon } from "../ui/Icon";
@@ -17,6 +18,7 @@ export function Monitor() {
   const nav = useNavigate();
   const toast = useToast();
   const { theme } = useTheme();
+  const can = useCan();
   const [snap, setSnap] = useState<MonitorSnapshot | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -73,8 +75,8 @@ export function Monitor() {
           <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--ok)", animation: "pulse 2s infinite" }} />
           Live · updated {relativeTime(snap.updated_at)}
         </span>
-        <Button icon="refresh" disabled={refreshing} onClick={refresh}>{refreshing ? "Refreshing…" : "Refresh"}</Button>
-        <Button variant="primary" icon="add" onClick={() => setAddOpen(true)}>Add service check</Button>
+        {can.edit && <Button icon="refresh" disabled={refreshing} onClick={refresh}>{refreshing ? "Refreshing…" : "Refresh"}</Button>}
+        {can.edit && <Button variant="primary" icon="add" onClick={() => setAddOpen(true)}>Add service check</Button>}
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(480px,1fr))", gap: 16, alignItems: "start" }}>
@@ -91,7 +93,7 @@ export function Monitor() {
               <div key={c.id} style={{ display: "grid", gridTemplateColumns: "24px minmax(0,1fr) 140px 70px 104px", gap: 10, alignItems: "center", padding: "0 14px", height: 44, borderBottom: "1px solid var(--border)" }}>
                 <span style={{ width: 24, height: 24, borderRadius: 5, background: tile.tbg, color: tile.tfg, fontFamily: "'Geist Mono',monospace", fontSize: 10, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center" }}>{c.type.slice(0, 2).toUpperCase()}</span>
                 <span style={{ fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</span>
-                <span style={{ fontFamily: "'Geist Mono',monospace", fontSize: 11, color: "var(--text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.server_version || "—"}</span>
+                <span title={c.note || undefined} style={{ fontFamily: "'Geist Mono',monospace", fontSize: 11, color: "var(--text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.server_version || c.note || "—"}</span>
                 <span style={{ fontFamily: "'Geist Mono',monospace", fontSize: 12, color: "var(--text-2)", textAlign: "right" }}>{c.latency_ms != null ? (c.latency_ms < 1 ? "<1 ms" : `${Math.round(c.latency_ms)} ms`) : "—"}</span>
                 <span style={{ justifySelf: "end" }}><StatusBadge b={b} size="sm" /></span>
               </div>
@@ -177,11 +179,11 @@ export function Monitor() {
                 </div>
                 <span style={{ justifySelf: "end" }}><StatusBadge b={b} size="sm" /></span>
                 <div style={{ justifySelf: "end", position: "relative" }}>
-                  <RowMenu size={24} width={150} items={[
+                  {can.edit && <RowMenu size={24} width={150} items={[
                     { icon: "bolt", label: "Run now", onClick: () => runNow(s) },
                     { icon: s.enabled ? "pause" : "play_arrow", label: s.enabled ? "Disable" : "Enable", onClick: () => toggleEnabled(s) },
                     { icon: "delete", label: "Delete", tone: "var(--err)", onClick: () => remove(s) },
-                  ]} />
+                  ]} />}
                 </div>
               </div>
             );

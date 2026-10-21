@@ -12,14 +12,14 @@ import { Logo } from "../shell/Logo";
 export function Login() {
   const { login } = useAuth();
   const { theme, toggle } = useTheme();
-  const [user, setUser] = useState("admin");
+  const [user, setUser] = useState("");
   const [pass, setPass] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
-    if (!pass) return setErr("Enter the admin password.");
+    if (!user.trim() || !pass) return setErr("Enter your username and password.");
     setErr("");
     setBusy(true);
     try {
@@ -42,7 +42,7 @@ export function Login() {
         <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: 24, display: "flex", flexDirection: "column", gap: 16, boxShadow: "var(--shadow-1)" }}>
           <div>
             <h1 style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>Sign in</h1>
-            <p style={{ margin: "4px 0 0", color: "var(--text-2)" }}>Local admin account on this machine.</p>
+            <p style={{ margin: "4px 0 0", color: "var(--text-2)" }}>With your Conduit account. Ask a superadmin if you don't have one.</p>
           </div>
           <Field label="Username">
             <Input value={user} onChange={(e) => setUser(e.target.value)} autoFocus />
@@ -59,9 +59,6 @@ export function Login() {
           <Button type="submit" variant="primary" height={36} disabled={busy} style={{ justifyContent: "center" }}>
             {busy ? "Signing in…" : "Sign in"}
           </Button>
-        </div>
-        <div style={{ fontFamily: "'Geist Mono',monospace", fontSize: 11, color: "var(--text-3)", textAlign: "center" }}>
-          Conduit · single-user mode
         </div>
       </form>
     </div>

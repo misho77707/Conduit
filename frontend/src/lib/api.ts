@@ -3,9 +3,11 @@
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  code: string | null; // a permission error's code: "forbidden" | "password_change_required"
+  constructor(status: number, message: string, code: string | null = null) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -20,11 +22,13 @@ export function setToken(t: string | null) {
 }
 
 // FastAPI's own request-validation errors (a field failing a pydantic validator) shape `detail` as a
-// list of {msg, loc, ...} objects, not the plain string our own HTTPException(...) calls use.
+// list of {msg, loc, ...} objects, not the plain string our own HTTPException(...) calls use. Permission errors
+// (backend/app/deps.py) are {code, message}.
 function detailMessage(body: unknown): string | null {
   if (!body || typeof body !== "object" || !("detail" in body)) return null;
   const detail = (body as { detail: unknown }).detail;
   if (typeof detail === "string") return detail;
+  if (detail && typeof detail === "object" && "message" in detail) return String((detail as { message: unknown }).message);
   if (Array.isArray(detail)) {
     const msgs = detail.map((d) => {
       const msg = d && typeof d === "object" && "msg" in d ? String((d as { msg: unknown }).msg) : String(d);
@@ -33,6 +37,20 @@ function detailMessage(body: unknown): string | null {
     return msgs.join("; ") || null;
   }
   return null;
+}
+
+function detailCode(body: unknown): string | null {
+  const detail = body && typeof body === "object" && "detail" in body ? (body as { detail: unknown }).detail : null;
+  return detail && typeof detail === "object" && "code" in detail ? String((detail as { code: unknown }).code) : null;
+}
+
+// The API ended the session (401: password or role changed, deactivated, deleted), or wants a new password before
+// anything else (403 password_change_required). lib/auth.tsx listens and routes accordingly.
+export type SessionEvent = "signed_out" | "password_change_required";
+const sessionListeners = new Set<(e: SessionEvent) => void>();
+export function onSessionEvent(fn: (e: SessionEvent) => void): () => void {
+  sessionListeners.add(fn);
+  return () => { sessionListeners.delete(fn); };
 }
 
 async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -47,7 +65,14 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
   const isJson = res.headers.get("content-type")?.includes("application/json");
   const body = isJson ? await res.json().catch(() => null) : null;
   if (!res.ok) {
-    throw new ApiError(res.status, detailMessage(body) || res.statusText || `Request failed (${res.status})`);
+    const code = detailCode(body);
+    if (res.status === 401 && token && path !== "/auth/login") {
+      setToken(null);
+      sessionListeners.forEach((fn) => fn("signed_out"));
+    } else if (res.status === 403 && code === "password_change_required") {
+      sessionListeners.forEach((fn) => fn("password_change_required"));
+    }
+    throw new ApiError(res.status, detailMessage(body) || res.statusText || `Request failed (${res.status})`, code);
   }
   return body as T;
 }
@@ -67,12 +92,31 @@ function del<T>(path: string) {
 
 // ---- auth -------------------------------------------------------------------------
 
+export type Role = "superadmin" | "admin" | "viewer";
 export interface TokenOut { access_token: string; token_type: string; }
-export interface UserOut { id: string; username: string; role: string; }
+export interface UserOut { id: string; username: string; role: Role; must_change_password: boolean; }
 
 export const auth = {
   login: (username: string, password: string) => post<TokenOut>("/auth/login", { username, password }),
   me: () => get<UserOut>("/auth/me"),
+  // every role; ends your other sessions and returns a fresh token for this one
+  changePassword: (current_password: string, new_password: string) =>
+    post<TokenOut>("/auth/password", { current_password, new_password }),
+};
+
+// ---- users (superadmins only): backend/app/api/users.py ----------------------------------------------------
+
+export interface UserAdminOut {
+  id: string; username: string; role: Role; is_active: boolean; must_change_password: boolean;
+  created_at: string; created_by: string | null; last_login_at: string | null;
+}
+export const usersApi = {
+  list: () => get<UserAdminOut[]>("/users"),
+  create: (body: { username: string; role: Role; temporary_password: string }) => post<UserAdminOut>("/users", body),
+  update: (id: string, body: { role?: Role; is_active?: boolean }) => patch<UserAdminOut>(`/users/${id}`, body),
+  resetPassword: (id: string, temporary_password: string) =>
+    post<UserAdminOut>(`/users/${id}/reset-password`, { temporary_password }),
+  remove: (id: string) => del<void>(`/users/${id}`),
 };
 
 // ---- meta / connections -------------------------------------------------------------
@@ -285,6 +329,8 @@ export interface JobSnapshot {
   splits_total: number; splits_done: number; error: string | null;
   created_at: string; started_at: string | null; finished_at: string | null; has_rejects: boolean;
   phase: string | null; // a combined source: "staging …" / "joining" / "loading", then the final status
+  trigger?: "manual" | "schedule"; // Jobs list and detail
+  started_by?: string | null; // "schedule", a username, or null (a deleted user)
 }
 export interface JobSplitOut {
   idx: number; label: string; status: string; est_rows: number | null; rows_written: number;
@@ -292,8 +338,10 @@ export interface JobSplitOut {
 }
 export interface JobLogLine { t: number; level: string; msg: string; }
 export interface JobDetail extends JobSnapshot {
-  splits: JobSplitOut[]; plan: JobPlan | Record<string, unknown> | null; log: JobLogLine[];
-  spec: JobIn | null; // the request the job was created from
+  splits: JobSplitOut[]; log: JobLogLine[];
+  plan: JobPlan | Record<string, unknown> | null; // a viewer gets only {notes, warnings}
+  spec: JobIn | null; // the request the job was created from (null for a viewer)
+  source_label: string; target_label: string; // e.g. "orders (prod-pg)" and "public.orders (ch)"
 }
 
 export const jobsApi = {
@@ -346,7 +394,9 @@ export interface CompareSummary {
 }
 export interface CompareOut {
   id: string; name: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "stalled"; phase: string;
-  rows_source: number; rows_target: number; summary: CompareSummary | null; error: string | null; spec: CompareIn;
+  rows_source: number; rows_target: number; summary: CompareSummary | null; error: string | null;
+  spec: CompareIn | null; // null for a viewer
+  source_label: string; target_label: string;
   job_id: string | null; created_at: string; started_at: string | null; finished_at: string | null;
 }
 export interface CompareRowsOut { set: CompareSet; columns: string[]; rows: Record<string, unknown>[]; total: number; offset: number; limit: number; }
@@ -406,9 +456,13 @@ export interface HostSnapshot {
   disks: HostDisk[]; disks_unavailable: string[];
 }
 
+/** What every role sees of a connection on the Monitor; admins also get the rest of ConnectionOut. */
+export type ConnectionHealth = Pick<ConnectionOut, "id" | "name" | "type" | "status" | "latency_ms" | "last_checked_at" | "note">
+  & Partial<ConnectionOut>;
+
 export interface MonitorSnapshot {
   updated_at: string;
-  connections: ConnectionOut[];
+  connections: ConnectionHealth[];
   host: HostSnapshot;
   jobs: { running: number; queued: number; slots_total: number | null; worker_online: boolean | null; active: JobSnapshot[] };
   services: CheckOut[];
@@ -453,6 +507,16 @@ export interface PipelineOut {
   last_checked_at: string | null; last_check_note: string | null;
   source_columns: StepOutCol[] | null; // a combined source's join schema, from the last full preview
 }
+/** GET /pipelines (every role): the list's shape; the source, steps and target come with GET /pipelines/{id}. */
+export interface PipelineBriefOut {
+  id: string; name: string; description: string;
+  source_kind: "table" | "query" | "file" | "remote" | "combined";
+  source_label: string; target_label: string; step_count: number;
+  runnable: boolean; // a full preview cached the schema that /run and the scheduler need
+  schedule: string | null; enabled: boolean; next_run_at: string | null; last_run: PipelineLastRun | null;
+  last_checked_at: string | null; last_check_note: string | null;
+  created_by: string | null; created_at: string; updated_at: string;
+}
 export interface PipelinePreviewOut {
   columns: StepOutCol[]; rows: Record<string, unknown>[]; sampled_rows: number; full_chain: boolean;
   // set when a step failed: columns/rows are then the output of the step before it
@@ -462,7 +526,7 @@ export interface PipelinePreviewOut {
 }
 
 export const pipelinesApi = {
-  list: () => get<PipelineOut[]>("/pipelines"),
+  list: () => get<PipelineBriefOut[]>("/pipelines"),
   create: (body: PipelineIn) => post<PipelineOut>("/pipelines", body),
   get: (id: string) => get<PipelineOut>(`/pipelines/${id}`),
   update: (id: string, body: PipelinePatch) => patch<PipelineOut>(`/pipelines/${id}`, body),

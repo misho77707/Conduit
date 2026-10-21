@@ -6,6 +6,8 @@ import { Button } from "../ui/Button";
 import { StatusBadge } from "../ui/Badge";
 import { CompareSetup } from "./compare/Setup";
 import { CompareResult } from "./compare/Result";
+import { useCan } from "../lib/auth";
+import { Icon } from "../ui/Icon";
 
 function line(c: CompareOut): string {
   const s = c.summary;
@@ -21,6 +23,7 @@ function line(c: CompareOut): string {
 export function Compare() {
   const { id } = useParams<{ id: string }>();
   const nav = useNavigate();
+  const can = useCan();
   const [list, setList] = useState<CompareOut[] | null>(null);
 
   const load = () => compareApi.list().then(setList).catch(() => setList([]));
@@ -38,14 +41,14 @@ export function Compare() {
           <h1 style={{ margin: 0, fontSize: 20, fontWeight: 600, letterSpacing: "-0.01em" }}>Compare</h1>
           <p style={{ margin: "4px 0 0", color: "var(--text-2)" }}>Check that a target holds exactly what the source has: missing rows, extra rows, changed values and duplicates.</p>
         </div>
-        {id && <Button variant="primary" icon="add" onClick={() => nav("/compare")}>New comparison</Button>}
+        {id && can.edit && <Button variant="primary" icon="add" onClick={() => nav("/compare")}>New comparison</Button>}
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "minmax(240px,300px) minmax(0,1fr)", gap: 16, alignItems: "start" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           <div style={{ fontSize: 11, fontWeight: 500, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.04em", padding: "0 2px" }}>Recent</div>
           {list && list.length === 0 && <div style={{ fontSize: 12, color: "var(--text-3)", padding: "0 2px" }}>No comparisons yet. Only the latest few are kept.</div>}
-          {!id && list && list.length > 0 && (
+          {!id && can.edit && list && list.length > 0 && (
             <div style={{ padding: 12, borderRadius: 8, border: "1px solid var(--accent)", boxShadow: "0 0 0 3px var(--accent-soft)", background: "var(--surface)", fontSize: 12, fontWeight: 500 }}>New comparison</div>
           )}
           {list?.map((c) => {
@@ -62,7 +65,14 @@ export function Compare() {
             );
           })}
         </div>
-        {id ? <CompareResult id={id} onChanged={load} /> : <CompareSetup onStarted={(c) => { load(); nav(`/compare/${c.id}`); }} />}
+        {id ? <CompareResult id={id} onChanged={load} />
+          : can.edit ? <CompareSetup onStarted={(c) => { load(); nav(`/compare/${c.id}`); }} />
+          : (
+            <div style={{ background: "var(--surface)", border: "1px dashed var(--border-2)", borderRadius: 10, padding: "48px 24px", display: "flex", flexDirection: "column", alignItems: "center", gap: 10, textAlign: "center", color: "var(--text-2)" }}>
+              <Icon name="difference" style={{ fontSize: 26, color: "var(--text-3)" }} />
+              {list && list.length ? "Pick a comparison on the left to see its counts." : "No comparisons yet."}
+            </div>
+          )}
       </div>
     </div>
   );

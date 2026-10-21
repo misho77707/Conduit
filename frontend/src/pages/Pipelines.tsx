@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { connectionsApi, pipelinesApi, type ConnectionOut, type PipelineOut } from "../lib/api";
+import { connectionsApi, pipelinesApi, type ConnectionOut, type PipelineBriefOut } from "../lib/api";
+import { useCan } from "../lib/auth";
 import { useToast } from "../lib/toast";
 import { cronLabel, relativeTime, statusBadge, untilTime } from "../lib/format";
 import { Icon } from "../ui/Icon";
@@ -8,23 +9,16 @@ import { Button } from "../ui/Button";
 import { RowMenu } from "../ui/RowMenu";
 import { StatusBadge } from "../ui/Badge";
 import { NewPipelineModal } from "./pipelines/NewPipelineModal";
-import { remoteLabel } from "./remote/RemotePicker";
-import { combinedLabel } from "./pipelines/combined";
+const SOURCE_ICON: Record<PipelineBriefOut["source_kind"], string> = {
+  table: "database", query: "database", file: "description", remote: "cloud", combined: "join_inner",
+};
 
-function sourceLabel(p: PipelineOut, conns: ConnectionOut[]): { icon: string; text: string } {
-  if (p.source.combined) return { icon: "join_inner", text: `Combined · ${combinedLabel(p.source.combined, conns)}` };
-  if (p.source.remote) {
-    const r = p.source.remote;
-    return { icon: "cloud", text: `${remoteLabel(r, conns).split("/").pop() || r.path}${r.match === "exact" ? "" : ` · ${r.match}`}` };
-  }
-  if (p.source.file) return { icon: "description", text: p.source.file.path.split("/").pop() || p.source.file.path || "file" };
-  const conn = conns.find((c) => c.id === p.source.connection_id);
-  const what = p.source.table || (p.source.query ? "query" : "?");
-  return { icon: "database", text: `${conn?.name || "?"} · ${what}` };
+function sourceLabel(p: PipelineBriefOut): { icon: string; text: string } {
+  return { icon: SOURCE_ICON[p.source_kind], text: p.source_kind === "combined" ? `Combined · ${p.source_label}` : p.source_label };
 }
 
 /** "checked 5m ago · no new files": the scheduler's last look, when it is newer than the last run. */
-export function lastCheck(p: PipelineOut): string | null {
+export function lastCheck(p: Pick<PipelineBriefOut, "last_checked_at" | "last_check_note" | "last_run">): string | null {
   if (!p.last_checked_at || !p.last_check_note) return null;
   const ran = p.last_run?.started_at ? new Date(p.last_run.started_at).getTime() : 0;
   if (new Date(p.last_checked_at).getTime() < ran - 60_000 && p.last_check_note.startsWith("load started")) return null;
@@ -35,18 +29,19 @@ export function lastCheck(p: PipelineOut): string | null {
 export function Pipelines() {
   const nav = useNavigate();
   const toast = useToast();
-  const [pipes, setPipes] = useState<PipelineOut[] | null>(null);
-  const [conns, setConns] = useState<ConnectionOut[]>([]);
+  const can = useCan();
+  const [pipes, setPipes] = useState<PipelineBriefOut[] | null>(null);
+  const [conns, setConns] = useState<ConnectionOut[]>([]); // for the New pipeline dialog (admins)
   const [addOpen, setAddOpen] = useState(false);
 
   const load = () => pipelinesApi.list().then(setPipes).catch(() => toast("err", "Could not load pipelines"));
 
   useEffect(() => {
     load();
-    connectionsApi.list().then(setConns).catch(() => {});
+    if (can.edit) connectionsApi.list().then(setConns).catch(() => {});
   }, []);
 
-  async function runNow(p: PipelineOut) {
+  async function runNow(p: PipelineBriefOut) {
     try {
       const job = await pipelinesApi.run(p.id);
       nav(`/jobs/${job.id}`);
@@ -55,13 +50,13 @@ export function Pipelines() {
     }
   }
 
-  async function remove(p: PipelineOut) {
+  async function remove(p: PipelineBriefOut) {
     if (!confirm(`Delete pipeline "${p.name}"?`)) return;
     try { await pipelinesApi.remove(p.id); load(); }
     catch (e) { toast("err", "Could not delete the pipeline", e instanceof Error ? e.message : undefined); }
   }
 
-  async function toggleEnabled(p: PipelineOut) {
+  async function toggleEnabled(p: PipelineBriefOut) {
     try { await pipelinesApi.update(p.id, { enabled: !p.enabled }); load(); }
     catch (e) { toast("err", "Could not update the schedule", e instanceof Error ? e.message : undefined); }
   }
@@ -75,7 +70,7 @@ export function Pipelines() {
           <h1 style={{ margin: 0, fontSize: 20, fontWeight: 600, letterSpacing: "-0.01em" }}>Pipelines</h1>
           <p style={{ margin: "4px 0 0", color: "var(--text-2)" }}>Saved, reusable loads: read → transform → load.</p>
         </div>
-        <Button variant="primary" icon="add" onClick={() => setAddOpen(true)}>New pipeline</Button>
+        {can.edit && <Button variant="primary" icon="add" onClick={() => setAddOpen(true)}>New pipeline</Button>}
       </div>
 
       {pipes.length === 0 ? (
@@ -85,7 +80,7 @@ export function Pipelines() {
           </span>
           <div style={{ fontSize: 16, fontWeight: 600 }}>No pipelines yet</div>
           <p style={{ margin: 0, maxWidth: 420, color: "var(--text-2)" }}>Save a reusable read → transform → load recipe with visual steps, SQL or Python.</p>
-          <Button variant="primary" icon="add" onClick={() => setAddOpen(true)}>New pipeline</Button>
+          {can.edit && <Button variant="primary" icon="add" onClick={() => setAddOpen(true)}>New pipeline</Button>}
         </div>
       ) : (
         <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, overflowX: "auto" }}>
@@ -94,18 +89,17 @@ export function Pipelines() {
               <span>Pipeline</span><span>Source</span><span>Target</span><span>Steps</span><span>Last run</span><span>Schedule</span><span />
             </div>
             {pipes.map((p) => {
-              const src = sourceLabel(p, conns);
-              const targetConn = conns.find((c) => c.id === p.target.connection_id);
+              const src = sourceLabel(p);
               const b = p.last_run ? statusBadge(p.last_run.status) : null;
               return (
                 <div key={p.id} className="hover-surface2" style={{ display: "grid", gridTemplateColumns: "minmax(220px,1.4fr) minmax(170px,1.2fr) minmax(220px,1.4fr) 60px 150px 110px 70px", gap: 12, padding: "0 16px", minHeight: 54, alignItems: "center", borderBottom: "1px solid var(--border)", position: "relative" }}>
                   <div style={{ minWidth: 0 }}>
                     <div style={{ fontFamily: "'Geist Mono',monospace", fontWeight: 500 }}>{p.name}</div>
-                    <div style={{ fontSize: 12, color: "var(--text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.description || " "}</div>
+                    <div style={{ fontSize: 12, color: "var(--text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.description || (p.created_by ? `created by ${p.created_by}` : " ")}</div>
                   </div>
                   <span title={src.text} style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--text-2)", minWidth: 0 }}><Icon name={src.icon} style={{ fontSize: 16, color: "var(--text-3)", flexShrink: 0 }} /><span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{src.text}</span></span>
-                  <span style={{ fontFamily: "'Geist Mono',monospace", fontSize: 12, color: "var(--text-2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{targetConn?.name || "?"} · {p.target.table}</span>
-                  <span style={{ fontFamily: "'Geist Mono',monospace", color: "var(--text-2)" }}>{p.steps.length}</span>
+                  <span style={{ fontFamily: "'Geist Mono',monospace", fontSize: 12, color: "var(--text-2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.target_label}</span>
+                  <span style={{ fontFamily: "'Geist Mono',monospace", color: "var(--text-2)" }}>{p.step_count}</span>
                   <div style={{ display: "flex", flexDirection: "column", gap: 2, alignItems: "flex-start" }}>
                     {b ? <StatusBadge b={b} size="sm" /> : <span style={{ fontSize: 12, color: "var(--text-3)" }}>never run</span>}
                     {p.last_run?.finished_at && <span style={{ fontSize: 11, color: "var(--text-3)" }}>{relativeTime(p.last_run.finished_at)}</span>}
@@ -114,7 +108,7 @@ export function Pipelines() {
                     <span style={{ fontSize: 12, color: p.schedule && !p.enabled ? "var(--text-3)" : "var(--text-2)" }}>{p.schedule ? cronLabel(p.schedule) : "manual"}</span>
                     {p.schedule && (
                       <span style={{ fontSize: 11, color: "var(--text-3)" }}>
-                        {p.enabled ? (p.output_columns ? untilTime(p.next_run_at) : "no preview yet") : "paused"}
+                        {p.enabled ? (p.runnable ? untilTime(p.next_run_at) : "no preview yet") : "paused"}
                       </span>
                     )}
                     {lastCheck(p) && (
@@ -124,12 +118,14 @@ export function Pipelines() {
                     )}
                   </div>
                   <div style={{ display: "flex", gap: 4, justifyContent: "flex-end", position: "relative" }}>
+                    {can.edit && <>
                     <Button height={28} padX={10} onClick={() => nav(`/pipelines/${p.id}`)} style={{ fontSize: 12 }}>Open</Button>
                     <RowMenu width={170} items={[
-                      { icon: "play_arrow", label: "Run now", onClick: () => runNow(p), disabled: !p.output_columns || (!!p.source.combined && !p.source_columns) },
+                      { icon: "play_arrow", label: "Run now", onClick: () => runNow(p), disabled: !p.runnable, hint: p.runnable ? undefined : "Open it and refresh the preview first" },
                       ...(p.schedule ? [{ icon: p.enabled ? "pause" : "play_arrow", label: p.enabled ? "Pause schedule" : "Resume schedule", onClick: () => toggleEnabled(p) }] : []),
                       { icon: "delete", label: "Delete", tone: "var(--err)", onClick: () => remove(p) },
                     ]} />
+                    </>}
                   </div>
                 </div>
               );

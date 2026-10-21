@@ -1,33 +1,39 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { useAuth } from "../lib/auth";
+import { ROLE_LABEL, useAuth, type Can } from "../lib/auth";
 import { useTheme } from "../lib/theme";
 import { jobsApi } from "../lib/api";
 import { Icon } from "../ui/Icon";
 import { IconButton } from "../ui/Button";
 import { Logo } from "./Logo";
+import { ChangePasswordModal } from "../pages/account/Password";
 
-const DATA_NAV = [
-  { id: "connections", label: "Connections", icon: "database" },
-  { id: "upload", label: "Upload & Load", icon: "upload_file" },
+interface NavItem { id: string; label: string; icon: string; soon?: boolean; need?: keyof Can }
+
+const DATA_NAV: NavItem[] = [
+  { id: "connections", label: "Connections", icon: "database", need: "edit" },
+  { id: "upload", label: "Upload & Load", icon: "upload_file", need: "edit" },
   { id: "jobs", label: "Jobs", icon: "bolt" },
   { id: "pipelines", label: "Pipelines", icon: "account_tree" },
   { id: "compare", label: "Compare", icon: "difference" },
 ];
-const OPS_NAV = [
+const OPS_NAV: NavItem[] = [
   { id: "monitor", label: "Monitor", icon: "monitor_heart" },
-  { id: "control", label: "Control & Setup", icon: "tune", soon: true },
+  { id: "users", label: "Users", icon: "group", need: "manageUsers" },
+  { id: "control", label: "Control & Setup", icon: "tune", soon: true, need: "edit" },
 ];
 const TITLES: Record<string, string> = {
   connections: "Connections", upload: "Upload & Load", jobs: "Jobs", pipelines: "Pipelines", compare: "Compare",
-  monitor: "Monitor", control: "Control & Setup",
+  monitor: "Monitor", users: "Users", control: "Control & Setup",
 };
 
 export function AppShell({ children }: { children: ReactNode }) {
   const nav = useNavigate();
   const loc = useLocation();
   const page = loc.pathname.split("/")[1] || "connections";
-  const { user, logout } = useAuth();
+  const { user, logout, can } = useAuth();
+  const [passwordOpen, setPasswordOpen] = useState(false);
+  const shown = (n: NavItem) => !n.need || can[n.need];
   const { theme, toggle } = useTheme();
   const [collapsed, setCollapsed] = useState(() => window.innerWidth < 1100);
   const [userMenu, setUserMenu] = useState(false);
@@ -41,7 +47,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => { alive = false; clearInterval(iv); };
   }, []);
 
-  const item = (n: { id: string; label: string; icon: string; soon?: boolean }) => {
+  const item = (n: NavItem) => {
     const active = page === n.id;
     return (
       <button
@@ -75,6 +81,11 @@ export function AppShell({ children }: { children: ReactNode }) {
           <span style={{ color: "var(--text-2)" }}>{TITLES[page]}</span>
         </div>
         <div style={{ flex: 1 }} />
+        {can.viewer && (
+          <span title="Your account can look, not change: no loads, runs or edits" style={{ height: 24, display: "inline-flex", alignItems: "center", gap: 5, padding: "0 9px", borderRadius: 12, border: "1px solid var(--border-2)", background: "var(--surface-2)", color: "var(--text-2)", fontSize: 12, fontWeight: 500 }}>
+            <Icon name="visibility" style={{ fontSize: 14 }} />Viewer · read-only
+          </span>
+        )}
         {runningJobs > 0 && (
           <button
             onClick={() => nav("/jobs")}
@@ -100,8 +111,9 @@ export function AppShell({ children }: { children: ReactNode }) {
             <div style={{ position: "absolute", right: 0, top: 38, width: 220, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, boxShadow: "var(--shadow-2)", padding: 4, display: "flex", flexDirection: "column" }}>
               <div style={{ padding: "8px 10px 10px", borderBottom: "1px solid var(--border)", marginBottom: 4 }}>
                 <div style={{ fontWeight: 500 }}>{user?.username}</div>
-                <div style={{ fontSize: 12, color: "var(--text-3)" }}>Local account · full access</div>
+                <div style={{ fontSize: 12, color: "var(--text-3)" }}>{user ? ROLE_LABEL[user.role] : ""}{can.viewer ? " · read-only" : ""}</div>
               </div>
+              <MenuButton icon="key" label="Change password" onClick={() => { setUserMenu(false); setPasswordOpen(true); }} />
               <MenuButton icon={theme === "dark" ? "light_mode" : "dark_mode"} label="Switch theme" onClick={toggle} />
               <MenuButton icon="keyboard" label="Keyboard shortcuts" />
               <div style={{ height: 1, background: "var(--border)", margin: "4px 0" }} />
@@ -113,15 +125,16 @@ export function AppShell({ children }: { children: ReactNode }) {
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
         <nav style={{ width: collapsed ? 52 : 224, flexShrink: 0, borderRight: "1px solid var(--border)", background: "var(--surface)", display: "flex", flexDirection: "column", padding: "10px 8px", gap: 2, transition: "width .15s", overflow: "hidden" }}>
           {!collapsed && <NavLabel>Data</NavLabel>}
-          {DATA_NAV.map(item)}
+          {DATA_NAV.filter(shown).map(item)}
           {!collapsed && <NavLabel top>Operate</NavLabel>}
           {collapsed && <div style={{ height: 1, background: "var(--border)", margin: "8px 4px" }} />}
-          {OPS_NAV.map(item)}
+          {OPS_NAV.filter(shown).map(item)}
           <div style={{ flex: 1 }} />
           {!collapsed && <div style={{ padding: "8px 9px 2px", fontFamily: "'Geist Mono',monospace", fontSize: 11, color: "var(--text-3)", whiteSpace: "nowrap" }}>local</div>}
         </nav>
         <main style={{ flex: 1, minWidth: 0, overflow: "auto" }}>{children}</main>
       </div>
+      {passwordOpen && <ChangePasswordModal onClose={() => setPasswordOpen(false)} />}
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { Navigate, Route, HashRouter, Routes } from "react-router-dom";
-import { AuthProvider, useAuth } from "./lib/auth";
+import { AuthProvider, homeOf, useAuth, type Can } from "./lib/auth";
 import { ThemeProvider } from "./lib/theme";
 import { ToastProvider } from "./lib/toast";
 import { AppShell } from "./shell/AppShell";
@@ -12,17 +12,31 @@ import { Pipelines } from "./pages/Pipelines";
 import { Builder } from "./pages/pipelines/Builder";
 import { ComingSoon } from "./pages/ComingSoon";
 import { Compare } from "./pages/Compare";
+import { Users } from "./pages/Users";
+import { SetPasswordScreen } from "./pages/account/Password";
 
 function Private({ children }: { children: JSX.Element }) {
   const { user, loading } = useAuth();
   if (loading) return null;
   if (!user) return <Navigate to="/login" replace />;
+  if (user.must_change_password) return <SetPasswordScreen />; // nothing else until a temporary password is replaced
   return children;
+}
+
+/** A screen a role can't use sends it home (the API refuses its calls anyway). */
+function Only({ can: need, children }: { can: keyof Can; children: JSX.Element }) {
+  const { user, can } = useAuth();
+  return can[need] ? children : <Navigate to={homeOf(user)} replace />;
+}
+
+function Home() {
+  const { user } = useAuth();
+  return <Navigate to={homeOf(user)} replace />;
 }
 
 function Shell() {
   const { user } = useAuth();
-  if (user) return <Navigate to="/connections" replace />;
+  if (user) return <Navigate to={homeOf(user)} replace />;
   return <Login />;
 }
 
@@ -40,18 +54,19 @@ export default function App() {
                   <Private>
                     <AppShell>
                       <Routes>
-                        <Route path="/" element={<Navigate to="/connections" replace />} />
-                        <Route path="/connections" element={<Connections />} />
-                        <Route path="/upload" element={<Wizard />} />
+                        <Route path="/" element={<Home />} />
+                        <Route path="/connections" element={<Only can="edit"><Connections /></Only>} />
+                        <Route path="/upload" element={<Only can="edit"><Wizard /></Only>} />
                         <Route path="/jobs" element={<Jobs />} />
                         <Route path="/jobs/:id" element={<Jobs />} />
                         <Route path="/monitor" element={<Monitor />} />
                         <Route path="/pipelines" element={<Pipelines />} />
-                        <Route path="/pipelines/:id" element={<Builder />} />
+                        <Route path="/pipelines/:id" element={<Only can="edit"><Builder /></Only>} />
                         <Route path="/compare" element={<Compare />} />
                         <Route path="/compare/:id" element={<Compare />} />
-                        <Route path="/control" element={<ComingSoon title="Control & Setup" icon="tune" note="Environment setup, tool management and secrets. Coming later." />} />
-                        <Route path="*" element={<Navigate to="/connections" replace />} />
+                        <Route path="/users" element={<Only can="manageUsers"><Users /></Only>} />
+                        <Route path="/control" element={<Only can="edit"><ComingSoon title="Control & Setup" icon="tune" note="Environment setup, tool management and secrets. Coming later." /></Only>} />
+                        <Route path="*" element={<Home />} />
                       </Routes>
                     </AppShell>
                   </Private>

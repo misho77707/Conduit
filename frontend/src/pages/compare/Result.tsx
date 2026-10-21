@@ -5,6 +5,7 @@ import { useToast } from "../../lib/toast";
 import { fmtEta, fmtN, relativeTime, statusBadge } from "../../lib/format";
 import { Icon } from "../../ui/Icon";
 import { Button } from "../../ui/Button";
+import { useCan } from "../../lib/auth";
 import { Card, CardHeader, CardBody } from "../../ui/Card";
 import { StatusBadge } from "../../ui/Badge";
 import { ProgressBar } from "../../ui/ProgressBar";
@@ -26,6 +27,7 @@ const ORDER: CompareSet[] = ["missing", "extra", "mismatched", "dup_source", "du
 const PAGE = 100;
 
 export function CompareResult({ id, onChanged }: { id: string; onChanged: () => void }) {
+  const can = useCan();
   const nav = useNavigate();
   const toast = useToast();
   const [c, setC] = useState<CompareOut | null>(null);
@@ -57,7 +59,8 @@ export function CompareResult({ id, onChanged }: { id: string; onChanged: () => 
   const active = ACTIVE.has(c.status);
 
   async function again() {
-    try { const n = await compareApi.create(c!.spec); onChanged(); nav(`/compare/${n.id}`); }
+    if (!c?.spec) return;
+    try { const n = await compareApi.create(c.spec); onChanged(); nav(`/compare/${n.id}`); }
     catch (e) { toast("err", "Could not start the comparison", e instanceof Error ? e.message : undefined); }
   }
   async function cancel() {
@@ -79,16 +82,16 @@ export function CompareResult({ id, onChanged }: { id: string; onChanged: () => 
               <span style={{ fontFamily: "'Geist Mono',monospace", fontWeight: 500, fontSize: 14 }}>{c.name}</span>
             </div>
             <div style={{ fontSize: 12, color: "var(--text-3)", marginTop: 4 }}>
-              {c.finished_at ? `finished ${relativeTime(c.finished_at)}` : `started ${relativeTime(c.created_at)}`}
+              {c.source_label} → {c.target_label} · {c.finished_at ? `finished ${relativeTime(c.finished_at)}` : `started ${relativeTime(c.created_at)}`}
               {s?.seconds != null ? ` · took ${fmtEta(s.seconds)}` : ""}
               {c.job_id && <> · verifies <a href={`#/jobs/${c.job_id}`}>job {c.job_id.slice(0, 8)}</a></>}
             </div>
           </div>
           <StatusBadge b={statusBadge(c.status)} />
-          {active && <Button variant="danger" icon="stop_circle" onClick={cancel}>Cancel</Button>}
-          {!active && <Button icon="edit" onClick={() => nav("/compare", { state: { fromSpec: c.spec } })}>Edit</Button>}
-          {!active && <Button variant="primary" icon="replay" onClick={again}>Run again</Button>}
-          {!active && <Button variant="ghost" icon="delete" onClick={remove}>Delete</Button>}
+          {can.edit && active && <Button variant="danger" icon="stop_circle" onClick={cancel}>Cancel</Button>}
+          {can.edit && !active && c.spec && <Button icon="edit" onClick={() => nav("/compare", { state: { fromSpec: c.spec } })}>Edit</Button>}
+          {can.edit && !active && c.spec && <Button variant="primary" icon="replay" onClick={again}>Run again</Button>}
+          {can.edit && !active && <Button variant="ghost" icon="delete" onClick={remove}>Delete</Button>}
         </div>
         {active && (
           <div style={{ padding: "0 18px 16px", display: "flex", flexDirection: "column", gap: 8 }}>
@@ -113,8 +116,8 @@ export function CompareResult({ id, onChanged }: { id: string; onChanged: () => 
           <Verdict s={s} />
           <Tiles s={s} onPick={setTab} />
           <Details s={s} />
-          <SetBrowser id={c.id} s={s} tab={tab} setTab={setTab} />
-          <Exporter id={c.id} s={s} />
+          {can.edit && <SetBrowser id={c.id} s={s} tab={tab} setTab={setTab} />}
+          {can.edit && <Exporter id={c.id} s={s} />}
         </>
       )}
     </div>

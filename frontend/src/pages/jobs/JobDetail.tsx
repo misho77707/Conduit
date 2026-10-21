@@ -7,6 +7,7 @@ import { Icon } from "../../ui/Icon";
 import { Button } from "../../ui/Button";
 import { StatusBadge } from "../../ui/Badge";
 import { ProgressBar } from "../../ui/ProgressBar";
+import { useCan } from "../../lib/auth";
 
 const ACTIVE = new Set(["queued", "planning", "running", "stalled"]);
 
@@ -24,6 +25,7 @@ function elapsedLabel(startedAt: string | null, finishedAt: string | null): stri
 export function JobDetail({ jobId, onChanged }: { jobId: string; onChanged: () => void }) {
   const toast = useToast();
   const nav = useNavigate();
+  const can = useCan();
   const [job, setJob] = useState<JobDetailT | null>(null);
   const [cancelAsk, setCancelAsk] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -85,12 +87,16 @@ export function JobDetail({ jobId, onChanged }: { jobId: string; onChanged: () =
             <Icon name={combined ? "join_inner" : job.kind === "file_load" ? "description" : "database"} style={{ fontSize: 17, color: "var(--text-3)" }} />
             <span style={{ fontFamily: "'Geist Mono',monospace", fontWeight: 500, fontSize: 14 }}>{job.name}</span>
           </div>
-          <div style={{ fontSize: 12, color: "var(--text-3)", marginTop: 4, fontFamily: "'Geist Mono',monospace" }}>
+          <div style={{ fontSize: 12, color: "var(--text-2)", marginTop: 4, fontFamily: "'Geist Mono',monospace", overflowWrap: "anywhere" }}>
+            {job.source_label} → {job.target_label}
+          </div>
+          <div style={{ fontSize: 12, color: "var(--text-3)", marginTop: 2, fontFamily: "'Geist Mono',monospace" }}>
             job {job.id.slice(0, 8)} · {job.started_at ? `started ${fmtClock(job.started_at)}` : "not started"} · {job.workers} worker{job.workers === 1 ? "" : "s"}
+            {" · "}started by {job.started_by || "a deleted user"}
           </div>
         </div>
         <StatusBadge b={badge} />
-        {active && job.status !== "queued" && (
+        {can.edit && active && job.status !== "queued" && (
           <div style={{ position: "relative" }}>
             <Button variant="danger" icon="stop_circle" disabled={busy} onClick={() => setCancelAsk(true)}>Cancel</Button>
             {cancelAsk && (
@@ -105,16 +111,16 @@ export function JobDetail({ jobId, onChanged }: { jobId: string; onChanged: () =
             )}
           </div>
         )}
-        {(job.status === "failed" || job.status === "cancelled" || job.status === "stalled") && (
+        {can.edit && (job.status === "failed" || job.status === "cancelled" || job.status === "stalled") && (
           <Button variant="primary" icon="replay" disabled={busy} onClick={retry}>Retry</Button>
         )}
-        {job.kind !== "pipeline" && !active && (
+        {can.edit && job.kind !== "pipeline" && !active && (
           <Button icon="difference" onClick={() => nav("/compare", { state: { fromJobId: job.id } })} title="Compare this load's source with its target">Verify</Button>
         )}
-        {job.kind !== "pipeline" && (
+        {can.edit && job.kind !== "pipeline" && (
           <Button icon="edit" onClick={() => nav("/upload", { state: { fromJobId: job.id } })} title="Open this load in Upload & Load with every setting filled in">Edit &amp; re-run</Button>
         )}
-        {!active && (
+        {can.edit && !active && (
           <Button variant="ghost" icon="delete" onClick={remove}>Remove</Button>
         )}
       </div>
@@ -162,12 +168,12 @@ export function JobDetail({ jobId, onChanged }: { jobId: string; onChanged: () =
             <div style={{ fontFamily: "'Geist Mono',monospace", fontSize: 18, marginTop: 4, color: job.rows_rejected ? "var(--warn)" : "var(--ok)", display: "flex", gap: 6, alignItems: "center" }}>
               <Icon name={job.rows_rejected ? "warning" : "check"} style={{ fontSize: 17 }} />{fmtN(job.rows_rejected)}
             </div>
-            {job.has_rejects ? (
+            {job.has_rejects && can.edit ? (
               <a href="#" onClick={(e) => { e.preventDefault(); downloadRejects(); }} style={{ fontSize: 12, marginTop: 2, display: "inline-flex", gap: 4, alignItems: "center" }}>
                 <Icon name="download" style={{ fontSize: 14 }} />rejects.csv
               </a>
             ) : (
-              <div style={{ fontSize: 12, color: "var(--text-3)", marginTop: 2 }}>no reject file</div>
+              <div style={{ fontSize: 12, color: "var(--text-3)", marginTop: 2 }}>{job.has_rejects ? "reject file (admins)" : "no reject file"}</div>
             )}
           </div>
         </div>

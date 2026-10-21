@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { monitorApi, type CheckKind, type ConnectionOut } from "../../lib/api";
+import { monitorApi, type CheckKind, type ConnectionHealth } from "../../lib/api";
 import { useToast } from "../../lib/toast";
 import { Modal } from "../../ui/Modal";
 import { Field } from "../../ui/Field";
@@ -15,7 +15,7 @@ const DEFAULTS: Record<CheckKind, { target: string; expect: string; targetLabel:
   docker: { target: "", expect: "running", targetLabel: "Container name or ID", expectLabel: "Expect", placeholder: "my-container" },
 };
 
-export function ServiceCheckModal({ conns, onClose, onSaved }: { conns: ConnectionOut[]; onClose: () => void; onSaved: () => void }) {
+export function ServiceCheckModal({ conns, onClose, onSaved }: { conns: ConnectionHealth[]; onClose: () => void; onSaved: () => void }) {
   const toast = useToast();
   const sqlConns = conns.filter((c) => c.type !== "mongodb" && c.category !== "storage");
   const [name, setName] = useState("");
