@@ -72,14 +72,14 @@ def list_pipelines(session: Session = Depends(get_session)) -> list[PipelineOut]
     return [_out(p, jobs.get(p.last_job_id)) for p in pipes]
 
 
-@router.post("", status_code=status.HTTP_201_CREATED, dependencies=[Depends(admin_only)])
-def create_pipeline(body: PipelineIn, session: Session = Depends(get_session)) -> PipelineOut:
+@router.post("", status_code=status.HTTP_201_CREATED)
+def create_pipeline(body: PipelineIn, session: Session = Depends(get_session), user: User = Depends(admin_only)) -> PipelineOut:
     _validate_shape(body.source, body.target, body.options, body.steps)
     _check_connections(session, body.source, body.target)
     _check_schedule(body.schedule)
     p = Pipeline(name=body.name, description=body.description, source=body.source, target=body.target,
                 options=body.options, steps=body.steps, schedule=body.schedule, enabled=body.enabled,
-                next_run_at=_next_run_for(body.schedule, body.enabled))
+                next_run_at=_next_run_for(body.schedule, body.enabled), owner_id=user.id)
     session.add(p)
     try:
         session.commit()
@@ -275,7 +275,7 @@ def _source_conn(s: SourceIn) -> uuid.UUID | None:
     return next((i.source.connection_id for i in ordered if i.source.connection_id), None)
 
 
-def _launch(session: Session, p: Pipeline, user: User) -> Job:
+def _launch(session: Session, p: Pipeline, user: User, trigger: str = "manual") -> Job:
     """Build and dispatch a Job for this pipeline. Raises JobError/StepError/ValueError-family exceptions on a
     bad pipeline (no HTTP awareness), so app.engine.schedule's beat-driven runs can call this too. `_dispatch`
     itself can still raise HTTPException (broker down) - that propagates unchanged to whichever caller."""
@@ -284,7 +284,8 @@ def _launch(session: Session, p: Pipeline, user: User) -> Job:
     body = _job_in(p)
     prepare(body, session)  # catch a bad table, column or step now instead of after queueing
     job = Job(name=p.name, kind="pipeline", spec=body.model_dump(mode="json"), source_conn_id=_source_conn(body.source),
-             target_conn_id=body.target.connection_id, workers=body.options.workers, owner_id=user.id, pipeline_id=p.id)
+             target_conn_id=body.target.connection_id, workers=body.options.workers, owner_id=user.id, pipeline_id=p.id,
+             trigger=trigger)
     session.add(job)
     session.commit()
     joblog.push(job.id, "info", f"queued (pipeline {p.name!r})")

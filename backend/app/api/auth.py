@@ -7,9 +7,10 @@ from sqlalchemy.orm import Session
 
 from ..db import get_session
 from ..deps import self_service
-from ..models import User
-from ..schemas import LoginIn, TokenOut, UserOut
-from ..security import create_token, verify_password
+from ..models import User, utcnow
+from ..schemas import LoginIn, PasswordChangeIn, TokenOut, UserOut
+from ..security import create_token, hash_password, verify_password
+from ..users import password_problem
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -34,14 +35,38 @@ def login(body: LoginIn, request: Request, session: Session = Depends(get_sessio
     user = session.scalar(select(User).where(User.username == body.username))
     # Verify against a dummy hash when the user is unknown so timing does not reveal valid usernames.
     stored = user.password_hash if user else "scrypt$16384$8$1$AAAAAAAAAAAAAAAAAAAAAA==$" + "A" * 43 + "="
+    # A deactivated account gets the same answer as a wrong password
     ok = verify_password(body.password, stored) and user is not None and user.is_active
     if not ok:
         _FAILS[key].append(time.monotonic())
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid username or password")
     _FAILS.pop(key, None)
-    return TokenOut(access_token=create_token(str(user.id), user.role))
+    user.last_login_at = utcnow()
+    session.commit()
+    return TokenOut(access_token=create_token(str(user.id), user.role, user.token_version))
 
 
 @router.get("/me", response_model=UserOut)
 def me(user: User = Depends(self_service)) -> User:
     return user
+
+
+@router.post("/password", response_model=TokenOut)
+def change_password(body: PasswordChangeIn, request: Request, session: Session = Depends(get_session),
+                    user: User = Depends(self_service)) -> TokenOut:
+    """Change your own password (every role; also the way out of a temporary one). Every other session of yours
+    ends; this one continues with the token returned here."""
+    key = request.client.host if request.client else "unknown"
+    if _throttled(key):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many failed attempts. Try again in a few minutes.")
+    if not verify_password(body.current_password, user.password_hash):
+        _FAILS[key].append(time.monotonic())
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "The current password is not correct")
+    problem = password_problem(user.username, body.new_password, user.password_hash)
+    if problem:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, problem)
+    user.password_hash = hash_password(body.new_password)
+    user.must_change_password = False
+    user.token_version += 1
+    session.commit()
+    return TokenOut(access_token=create_token(str(user.id), user.role, user.token_version))

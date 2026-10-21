@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -16,10 +16,49 @@ class TokenOut(BaseModel):
 
 
 class UserOut(BaseModel):
+    """GET /auth/me: who you are, and whether you must set a new password before anything else works."""
+
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     username: str
-    role: str
+    role: str  # superadmin | admin | viewer
+    must_change_password: bool = False
+
+
+Role = Literal["superadmin", "admin", "viewer"]
+
+
+class PasswordChangeIn(BaseModel):
+    current_password: str = Field(max_length=500)
+    new_password: str = Field(max_length=500)
+
+
+class UserCreateIn(BaseModel):
+    username: str = Field(max_length=80)
+    role: Role
+    temporary_password: str = Field(max_length=500)  # the user must replace it at their first sign-in
+
+
+class UserPatchIn(BaseModel):
+    role: Role | None = None
+    is_active: bool | None = None
+
+
+class ResetPasswordIn(BaseModel):
+    temporary_password: str = Field(max_length=500)
+
+
+class UserAdminOut(BaseModel):
+    """A row of the Users screen (superadmins only)."""
+
+    id: uuid.UUID
+    username: str
+    role: Role
+    is_active: bool
+    must_change_password: bool
+    created_at: datetime
+    created_by: str | None  # username; None for the first-run account or when its creator was deleted
+    last_login_at: datetime | None
 
 
 class ConnectionIn(BaseModel):

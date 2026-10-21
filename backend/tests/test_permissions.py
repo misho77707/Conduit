@@ -15,6 +15,13 @@ SELF, VIEWER, VIEWER_SSE, ADMIN, SUPER = "self_service", "viewer_ok", "viewer_ok
 
 EXPECTED = {
     ("GET", "/api/auth/me"): SELF,
+    ("POST", "/api/auth/password"): SELF,
+    # user management
+    ("GET", "/api/users"): SUPER,
+    ("POST", "/api/users"): SUPER,
+    ("PATCH", "/api/users/{user_id}"): SUPER,
+    ("POST", "/api/users/{user_id}/reset-password"): SUPER,
+    ("DELETE", "/api/users/{user_id}"): SUPER,
     # connections and the add-connection flow
     ("GET", "/api/connections"): ADMIN,
     ("POST", "/api/connections"): ADMIN,
@@ -143,7 +150,7 @@ def test_an_admin_gets_403_from_superadmin_routes(client, auth_admin):
 
 def test_a_viewer_is_let_into_viewer_routes(client, auth_viewer):
     for (method, path), perm in EXPECTED.items():
-        if perm in (VIEWER, SELF):
+        if perm in (VIEWER, SELF) and method == "GET":
             r = client.request(method, _url(path), headers=auth_viewer)
             assert r.status_code in (200, 404), (method, path, r.status_code, r.text[:200])  # 404: the random id
 

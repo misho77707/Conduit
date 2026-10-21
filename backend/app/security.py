@@ -52,9 +52,11 @@ def _jwt_secret() -> str:
     return hashlib.sha256(b"conduit-jwt:" + s.secret_key.encode()).hexdigest()
 
 
-def create_token(user_id: str, role: str) -> str:
+def create_token(user_id: str, role: str, version: int = 0) -> str:
+    """`role` is informational only (authorization always reads the users table); `ver` must equal the user's
+    token_version, so bumping it ends every session the user has."""
     now = int(time.time())
-    payload = {"sub": user_id, "role": role, "iat": now, "exp": now + get_settings().jwt_ttl_minutes * 60}
+    payload = {"sub": user_id, "role": role, "ver": version, "iat": now, "exp": now + get_settings().jwt_ttl_minutes * 60}
     return jwt.encode(payload, _jwt_secret(), algorithm="HS256")
 
 

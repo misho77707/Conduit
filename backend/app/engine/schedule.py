@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 from croniter import CroniterBadCronError, CroniterBadDateError, CroniterNotAlphaError, croniter
-from sqlalchemy import select, update
+from sqlalchemy import case, select, update
 from sqlalchemy.orm import Session
 
 from ..db import get_sessionmaker
@@ -69,9 +69,16 @@ def _claim(session: Session, pipeline_id) -> bool:
     return res.rowcount == 1
 
 
-def _system_user(session: Session) -> User | None:
-    """A scheduled run has no request/session user; use the oldest active account (this is a single-admin tool)."""
-    return session.scalars(select(User).where(User.is_active.is_(True)).order_by(User.created_at)).first()
+def _run_as(session: Session, p: Pipeline) -> User | None:
+    """Who a scheduled run is recorded as (the job shows "Started by: schedule" either way): the pipeline's owner while
+    they are an active admin or superadmin, else the longest-standing active superadmin, then admin. Never a viewer
+    or a deactivated account, so deactivating someone never stops the schedules."""
+    owner = session.get(User, p.owner_id) if p.owner_id else None
+    if owner is not None and owner.is_active and owner.role in ("admin", "superadmin"):
+        return owner
+    q = (select(User).where(User.is_active.is_(True), User.role.in_(("superadmin", "admin")))
+         .order_by(case((User.role == "superadmin", 0), else_=1), User.created_at))
+    return session.scalars(q).first()
 
 
 def run_and_dispatch(pipeline_id) -> bool:
@@ -86,15 +93,15 @@ def run_and_dispatch(pipeline_id) -> bool:
         if p is None:
             return False
         queued = False
-        user = _system_user(s)
+        user = _run_as(s, p)
         go, note = _worth_running(s, p)
         if not go:  # a remote source with nothing new: no job (it would only push real loads out of the Jobs list)
             p.last_checked_at, p.last_check_note = utcnow(), note[:500]
         elif user is None:
-            log.error("pipeline %s is due but no active user exists to run it as", pipeline_id)
+            log.error("pipeline %s is due but there is no active admin or superadmin to run it as", pipeline_id)
         else:
             try:
-                _launch(s, p, user)
+                _launch(s, p, user, trigger="schedule")
                 queued = True
                 if note:
                     p.last_checked_at, p.last_check_note = utcnow(), f"load started: {note}"[:500]

@@ -2,7 +2,7 @@ def test_login_ok_and_me(client, auth_superadmin):
     r = client.get("/api/auth/me", headers=auth_superadmin)
     assert r.status_code == 200
     assert r.json()["username"] == "admin" and r.json()["role"] == "superadmin"  # the first-run account
-    assert "password" not in r.text
+    assert "password_hash" not in r.text and "scrypt" not in r.text
 
 
 def test_wrong_password_and_unknown_user_look_the_same(client):
