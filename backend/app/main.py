@@ -1,4 +1,5 @@
 import logging
+import re
 from contextlib import asynccontextmanager
 
 from cryptography.fernet import Fernet
@@ -12,6 +13,23 @@ from .config import get_settings
 from .db import get_engine
 
 log = logging.getLogger("conduit")
+
+
+class HideTokens(logging.Filter):
+    """uvicorn's access log prints each request's query string, and a job's event stream carries the login token
+    there (?token=..., EventSource can't send headers): it is masked before the line is written."""
+
+    _token = re.compile(r"(?<=[?&]token=)[^&\s]*")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(self._token.sub("***", a) if isinstance(a, str) else a for a in record.args)
+        elif isinstance(record.msg, str):
+            record.msg = self._token.sub("***", record.msg)
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(HideTokens())
 
 
 @asynccontextmanager

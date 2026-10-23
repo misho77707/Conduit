@@ -14,9 +14,16 @@ from ..users import password_problem
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-# Tiny in-memory brute-force guard: 10 failures / 5 min per client address.
+# Tiny in-memory brute-force guard: 10 failures / 5 min per username and client address, so one person's typos
+# never lock out anyone else. The client address is the real one behind the bundled nginx: uvicorn takes it from
+# X-Forwarded-For only when the request comes from that nginx (--proxy-headers --forwarded-allow-ips, see
+# docker-compose.yml), and nginx sets the header to the address it saw itself.
 _FAILS: dict[str, deque[float]] = defaultdict(deque)
 _WINDOW_S, _MAX_FAILS = 300, 10
+
+
+def _key(request: Request, username: str) -> str:
+    return f"{request.client.host if request.client else 'unknown'}|{username.strip().lower()}"
 
 
 def _throttled(key: str) -> bool:
@@ -29,7 +36,7 @@ def _throttled(key: str) -> bool:
 
 @router.post("/login", response_model=TokenOut)
 def login(body: LoginIn, request: Request, session: Session = Depends(get_session)) -> TokenOut:
-    key = request.client.host if request.client else "unknown"
+    key = _key(request, body.username)
     if _throttled(key):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many failed attempts. Try again in a few minutes.")
     user = session.scalar(select(User).where(User.username == body.username))
@@ -56,7 +63,7 @@ def change_password(body: PasswordChangeIn, request: Request, session: Session =
                     user: User = Depends(self_service)) -> TokenOut:
     """Change your own password (every role; also the way out of a temporary one). Every other session of yours
     ends; this one continues with the token returned here."""
-    key = request.client.host if request.client else "unknown"
+    key = _key(request, user.username)
     if _throttled(key):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many failed attempts. Try again in a few minutes.")
     if not verify_password(body.current_password, user.password_hash):

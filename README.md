@@ -31,7 +31,9 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 docker compose up --build
 ```
 
-- App: http://localhost:5173 · API + docs: http://localhost:8000/docs
+- App: http://localhost:5173. The API is reached through the same address (`/api/...`, proxied by the frontend's
+  nginx); its own port 8000 is not published. For local development (`npm run dev`, the OpenAPI docs at
+  http://localhost:8000/docs) uncomment the `ports` override under `api` in `docker-compose.yml`.
 - First sign-in: user `admin` (`CONDUIT_ADMIN_USER`), a **superadmin**. The password is `CONDUIT_ADMIN_PASSWORD`,
   or, if you left it empty, a temporary one printed once (`docker compose logs api | grep "generated password"`)
   that you replace at that first sign-in. Both variables are read only while the users table is empty: after
@@ -179,8 +181,21 @@ it once to copy); resetting a password sets a new temporary one. Until the user 
 
 **Sessions.** A token carries the user's `token_version`; changing or resetting a password, changing the role
 and deactivating bump it, so the user's other sessions end at their next request (open job streams stop too).
-Login keeps its throttle (10 failures in 5 minutes per address) and records the last sign-in. A deactivated user
-gets the same "Invalid username or password" as a wrong password.
+Login keeps its throttle, now 10 failures in 5 minutes per username **and** client address, so one person's typos
+never lock out anyone else; it records the last sign-in. A deactivated user gets the same "Invalid username or
+password" as a wrong password.
+
+**Behind the bundled nginx.** The API's port isn't published: browsers reach it through the frontend's nginx,
+which sets `X-Forwarded-For` to the address it saw itself (never one a client sent). uvicorn takes the client
+address from that header only when the request comes from that nginx (`--proxy-headers --forwarded-allow-ips`,
+with nginx on a fixed address: `CONDUIT_PROXY_IP` in a fixed subnet, `CONDUIT_SUBNET`, both in `.env.example`); a
+request from anywhere else keeps its own address whatever header it sends. On Docker Desktop every browser on
+the same machine arrives from one internal address, so there the username part is what keeps people apart.
+
+**Tokens never reach a log.** The job event stream (`/api/jobs/{id}/events`) is the one route that carries the
+login token in its URL (`?token=`, since EventSource can't send headers; downloads send it as a header). nginx
+logs that route without its query string and only critical errors for it, and the API's access log shows
+`token=***`.
 
 **The last superadmin.** There is always one active superadmin: demoting, deactivating or deleting the last
 one is refused (409, with the reason), also when they do it to themselves. The Users screen shows it (a "last
@@ -607,8 +622,8 @@ from the real API — there is no mock data layer. `docker compose` serves the p
 nginx on :5173, proxying `/api` to the `api` service (`frontend/nginx.conf`; SSE works there too,
 `proxy_buffering off`). For frontend-only iteration with hot reload, run the backend via Docker and the
 UI separately: `cd frontend && npm install && npm run dev` (Vite's dev server proxies `/api` to
-`localhost:8000`, see `vite.config.ts`) — stop the `frontend` container first, or both will fight over
-:5173.
+`localhost:8000`, see `vite.config.ts`: uncomment the API's `ports` override in `docker-compose.yml` first) —
+stop the `frontend` container first, or both will fight over :5173.
 
 **Adapted from the mockup, deliberately, because the backend doesn't do these (yet):**
 - All four source tabs are real: Upload, Server folder (`GET /files/list`), Remote (S3 / SFTP / URL, see
@@ -843,3 +858,13 @@ celery -A app.worker.celery_app beat --loglevel=info
   provoked on purpose). **Not verified live**: the first-run seeding with a generated password on an empty
   database (tests only), and signing in as the migrated admin with their own password (it was checked with a
   token the app minted for that account).
+- **Login throttle and token logging** were verified live on a throwaway copy of the stack (fresh database, its own
+  subnet), through the real nginx:
+  - the API's port wasn't published;
+  - ten wrong passwords for one user returned 429 for that user only, while another user signed in from the
+    same client;
+  - a forged `X-Forwarded-For` was ignored both through nginx and when sent straight to the API from another
+    container (the API recorded the real peer each time);
+  - a job event stream request with `?token=` appeared in nginx's log without the query string and in the
+    API's as `token=***`;
+  - no container log contained a token.
