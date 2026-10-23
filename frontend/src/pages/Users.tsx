@@ -189,7 +189,7 @@ function AddUserModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
     <Modal width={480} title="Add user" sub="They sign in with a temporary password and must set their own first." onClose={onClose}>
       <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <Field label="Username">
-          <Input mono autoFocus value={username} onChange={(e) => setUsername(e.target.value)} placeholder="nino" autoComplete="off" />
+          <Input mono autoFocus value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Michael" autoComplete="off" />
         </Field>
         <RolePicker value={role} onChange={setRole} />
         <TempPassword username={username} value={password} onChange={setPassword} />

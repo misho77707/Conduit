@@ -10,3 +10,7 @@ celerybeat-schedule*
 frontend/design/
 CLAUDE.md
 
+
+# database backups (they hold password hashes and encrypted connection secrets)
+*.dump
+*.sql
