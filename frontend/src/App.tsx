@@ -1,3 +1,4 @@
+import { lazy, Suspense } from "react";
 import { Navigate, Route, HashRouter, Routes } from "react-router-dom";
 import { AuthProvider, homeOf, useAuth, type Can } from "./lib/auth";
 import { ThemeProvider } from "./lib/theme";
@@ -12,7 +13,8 @@ import { Pipelines } from "./pages/Pipelines";
 import { Builder } from "./pages/pipelines/Builder";
 import { Compare } from "./pages/Compare";
 import { SetPasswordScreen } from "./pages/account/Password";
-import { ControlSetup } from "./pages/control/ControlSetup";
+// Control & Setup is for admins only: its code loads when first opened.
+const ControlSetup = lazy(() => import("./pages/control/ControlSetup").then((m) => ({ default: m.ControlSetup })));
 
 function Private({ children }: { children: JSX.Element }) {
   const { user, loading } = useAuth();
@@ -64,8 +66,8 @@ export default function App() {
                         <Route path="/compare" element={<Compare />} />
                         <Route path="/compare/:id" element={<Compare />} />
                         <Route path="/users" element={<Navigate to="/control/users" replace />} />{/* moved into Control & Setup */}
-                        <Route path="/control" element={<Only can="edit"><ControlSetup /></Only>} />
-                        <Route path="/control/:tab" element={<Only can="edit"><ControlSetup /></Only>} />
+                        <Route path="/control" element={<Only can="edit"><Suspense fallback={null}><ControlSetup /></Suspense></Only>} />
+                        <Route path="/control/:tab" element={<Only can="edit"><Suspense fallback={null}><ControlSetup /></Suspense></Only>} />
                         <Route path="*" element={<Home />} />
                       </Routes>
                     </AppShell>

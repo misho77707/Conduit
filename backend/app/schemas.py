@@ -99,6 +99,7 @@ class ConnectionOut(BaseModel):
     note: str | None
     last_checked_at: datetime | None
     created_at: datetime
+    needs_credentials: bool = False  # imported without its secrets: unusable until edited with them
 
 
 class TestResultOut(BaseModel):
@@ -412,3 +413,46 @@ class SettingOut(BaseModel):
 
 class SettingIn(BaseModel):
     value: Any  # checked against the setting's type and bounds (422 with a one-line reason)
+
+
+# ---- export / import (Control & Setup) ------------------------------------------------------------------------
+
+class ExportIn(BaseModel):
+    include_secrets: bool = False  # superadmins only; needs a passphrase (the instance key never leaves)
+    passphrase: str | None = None
+
+
+class ImportIn(BaseModel):
+    document: dict[str, Any]  # the exported file's JSON
+    passphrase: str | None = None  # opens the file's secrets; without it they are left out
+
+
+class ImportApplyIn(ImportIn):
+    picked: list[str]  # item keys from the plan
+
+
+class ImportItemOut(BaseModel):
+    key: str
+    section: Literal["settings", "connections", "service_checks", "pipelines", "alert_channels", "alert_rules"]
+    name: str
+    action: Literal["create", "update", "skip", "conflict"]
+    notes: list[str]
+
+
+class ImportPlanOut(BaseModel):
+    instance: str  # where the file came from
+    exported_at: str | None
+    version: int
+    secrets: str  # none | encrypted
+    secrets_used: bool  # a passphrase opened them
+    notes: list[str]
+    items: list[ImportItemOut]
+
+
+class ImportResultOut(BaseModel):
+    key: str
+    section: str
+    name: str
+    action: str
+    ok: bool
+    error: str | None

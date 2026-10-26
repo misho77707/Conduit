@@ -136,6 +136,7 @@ export function Connections() {
                         <div style={{ fontWeight: 500, display: "flex", gap: 6, alignItems: "center" }}>
                           {c.name}
                           {c.env && <span style={{ fontFamily: "'Geist Mono',monospace", fontSize: 10, padding: "0 5px", borderRadius: 4, border: "1px solid var(--border-2)", color: "var(--text-3)" }}>{c.env}</span>}
+                          {c.needs_credentials && <span title="Imported without its secrets: edit it and add them before it can be used" style={{ fontSize: 10, fontWeight: 600, padding: "0 5px", borderRadius: 4, background: "var(--warn-soft)", color: "var(--warn)" }}>needs credentials</span>}
                         </div>
                         <div style={{ fontFamily: "'Geist Mono',monospace", fontSize: 11, color: "var(--text-3)" }}>{c.category === "storage" ? "file storage" : `db: ${c.database || "—"}`}</div>
                       </div>

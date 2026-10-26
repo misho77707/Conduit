@@ -97,6 +97,10 @@ EXPECTED = {
     ("GET", "/api/settings"): ADMIN,
     ("PUT", "/api/settings/{key}"): ADMIN,
     ("DELETE", "/api/settings/{key}"): ADMIN,
+    # export / import (Control & Setup)
+    ("POST", "/api/export"): ADMIN,
+    ("POST", "/api/import/plan"): ADMIN,
+    ("POST", "/api/import/apply"): ADMIN,
 }
 
 

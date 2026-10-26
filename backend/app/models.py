@@ -58,6 +58,8 @@ class Connection(Base):
     display_host: Mapped[str] = mapped_column(String(300), default="")
     # Fernet-encrypted JSON of secret fields (password, connection string, keys).
     secret_enc: Mapped[str] = mapped_column(Text, default="")
+    # imported without its secrets: unusable (no health checks, tests, previews or jobs) until edited with them
+    needs_credentials: Mapped[bool] = mapped_column(default=False)
 
     # Current state (overwritten on every check)
     status: Mapped[str] = mapped_column(String(12), default="idle")  # ok | warn | err | idle

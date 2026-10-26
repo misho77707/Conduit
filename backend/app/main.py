@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
-from .api import alerts, auth, compare, connections, files, jobs, monitor, pipelines, remote, settings, users
+from .api import alerts, auth, compare, connections, files, jobs, monitor, pipelines, remote, settings, transfer, users
 from .bootstrap import seed_admin
 from .config import get_settings
 from .db import get_engine
@@ -69,6 +69,7 @@ def create_app() -> FastAPI:
     app.include_router(users.router, prefix="/api")
     app.include_router(alerts.router, prefix="/api")
     app.include_router(settings.router, prefix="/api")
+    app.include_router(transfer.router, prefix="/api")
 
     @app.get("/api/health", tags=["meta"])
     def health() -> dict:

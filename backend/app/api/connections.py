@@ -17,7 +17,7 @@ from ..schemas import (
 )
 from ..security import SecretKeyError, decrypt_secrets
 from ..services import (
-    all_connections, build_connector, serialize, set_secrets, test_connection, test_many,
+    NeedsCredentials, all_connections, build_connector, serialize, set_secrets, test_connection, test_many,
 )
 
 router = APIRouter(prefix="/connections", tags=["connections"], dependencies=[Depends(admin_only)])
@@ -113,6 +113,8 @@ def update_connection(conn_id: uuid.UUID, body: ConnectionPatch, session: Sessio
     conn.config = config
     conn.display_host = get_connector(conn.type, config, secrets).display_host()
     set_secrets(conn, secrets)
+    if body.secrets and any(v not in (None, "") for v in body.secrets.values()):
+        conn.needs_credentials = False  # imported without secrets: usable again once they are given
     conn.status, conn.note = "idle", "Settings changed: not checked yet"
     try:
         session.commit()
@@ -142,6 +144,8 @@ async def list_tables(conn_id: uuid.UUID, session: Session = Depends(get_session
     try:
         connector = build_connector(conn)
         tables = await run_in_threadpool(connector.list_tables)
+    except NeedsCredentials as e:
+        raise HTTPException(422, str(e)) from e
     except (SecretKeyError, UnknownConnectorType) as e:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(e)) from e
     except Exception as e:
@@ -156,6 +160,8 @@ async def inspect_table(conn_id: uuid.UUID, table: str, session: Session = Depen
     try:
         connector = build_connector(conn)
         schema = await run_in_threadpool(connector.inspect, table)
+    except NeedsCredentials as e:
+        raise HTTPException(422, str(e)) from e
     except (SecretKeyError, UnknownConnectorType) as e:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(e)) from e
     except Exception as e:

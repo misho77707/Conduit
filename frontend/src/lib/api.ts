@@ -135,6 +135,7 @@ export interface ConnectionOut {
   id: string; name: string; type: string; env: string | null; host: string; category: ConnectionCategory; database: string | null;
   config: Record<string, unknown>; status: "ok" | "warn" | "err" | "idle"; latency_ms: number | null;
   server_version: string | null; note: string | null; last_checked_at: string | null; created_at: string;
+  needs_credentials: boolean; // imported without its secrets: unusable until edited with them
 }
 
 export interface TestResultOut {
@@ -620,4 +621,46 @@ export const settingsApi = {
   list: () => get<SettingOut[]>("/settings"),
   set: (key: string, value: number | string) => req<SettingOut>(`/settings/${key}`, { method: "PUT", body: JSON.stringify({ value }) }),
   reset: (key: string) => del<SettingOut>(`/settings/${key}`),
+};
+
+// ---- export / import (Control & Setup; admins) ----
+
+export type ImportSection = "settings" | "connections" | "service_checks" | "pipelines" | "alert_channels" | "alert_rules";
+export interface ImportItem {
+  key: string; // what apply picks
+  section: ImportSection;
+  name: string;
+  action: "create" | "update" | "skip" | "conflict";
+  notes: string[];
+}
+export interface ImportPlan {
+  instance: string; // where the file came from
+  exported_at: string | null;
+  version: number;
+  secrets: string; // none | encrypted
+  secrets_used: boolean; // a passphrase opened them
+  notes: string[];
+  items: ImportItem[];
+}
+export interface ImportResult { key: string; section: string; name: string; action: string; ok: boolean; error: string | null; }
+
+export const transferApi = {
+  /** The export file (secrets only for a superadmin, under a passphrase). */
+  exportFile: async (include_secrets: boolean, passphrase: string | null): Promise<{ blob: Blob; filename: string }> => {
+    const token = getToken();
+    const res = await fetch("/api/export", {
+      method: "POST", body: JSON.stringify({ include_secrets, passphrase }),
+      headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    });
+    if (!res.ok) {
+      let msg = res.statusText;
+      try { msg = detailMessage(await res.json()) || msg; } catch { /* not JSON */ }
+      throw new ApiError(res.status, msg);
+    }
+    const plain = /filename="?([^";]+)"?/i.exec(res.headers.get("content-disposition") || "")?.[1];
+    return { blob: await res.blob(), filename: plain || "conduit-export.json" };
+  },
+  plan: (document: unknown, passphrase: string | null) => post<ImportPlan>("/import/plan", { document, passphrase }),
+  apply: (document: unknown, passphrase: string | null, picked: string[]) =>
+    post<ImportResult[]>("/import/apply", { document, passphrase, picked }),
 };

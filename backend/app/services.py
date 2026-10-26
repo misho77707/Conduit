@@ -7,13 +7,23 @@ from sqlalchemy.orm import Session
 
 from .runtime import current_settings
 from .connectors import Connector, category_of, get_connector
-from .connectors.base import TestResult
+from .connectors.base import TestResult, UserFacingError
 from .models import Connection, utcnow
 from .schemas import ConnectionOut
 from .security import SecretKeyError, decrypt_secrets, encrypt_secrets
 
 
+NEEDS_NOTE = "Needs credentials: edit it and add its secrets"
+
+
+class NeedsCredentials(UserFacingError, ValueError):
+    pass
+
+
 def build_connector(conn: Connection) -> Connector:
+    if conn.needs_credentials:
+        raise NeedsCredentials(f"{conn.name} needs credentials: it was imported without its secrets. Edit the "
+                               "connection and add them first.")
     secrets = decrypt_secrets(conn.secret_enc)
     return get_connector(conn.type, conn.config or {}, secrets, timeout=current_settings().connect_timeout_s)
 
@@ -24,6 +34,7 @@ def serialize(conn: Connection) -> ConnectionOut:
         database=(conn.config or {}).get("database"), config=conn.config or {},
         status=conn.status, latency_ms=conn.latency_ms, server_version=conn.server_version,
         note=conn.note, last_checked_at=conn.last_checked_at, created_at=conn.created_at,
+        needs_credentials=conn.needs_credentials,
     )
 
 
@@ -34,6 +45,10 @@ def set_secrets(conn: Connection, secrets: dict[str, Any]) -> None:
 def apply_result(conn: Connection, result: TestResult) -> None:
     """Overwrite the connection's current state. History is intentionally not kept."""
     now = utcnow()
+    if conn.needs_credentials:  # never tried: not "down" either (no streak, so no alert)
+        conn.status, conn.note, conn.last_checked_at = "idle", NEEDS_NOTE, now
+        conn.err_streak, conn.err_since, conn.bad_streak, conn.bad_since = 0, None, 0, None
+        return
     # consecutive bad checks (and since when), for "connection down for K checks" alerts
     if result.status == "err":
         conn.err_since = conn.err_since if conn.err_streak else now
@@ -58,6 +73,8 @@ def apply_result(conn: Connection, result: TestResult) -> None:
 
 
 def _test_one(conn: Connection) -> TestResult:
+    if conn.needs_credentials:
+        return TestResult(ok=False, error=NEEDS_NOTE)
     try:
         return build_connector(conn).test()
     except SecretKeyError as e:
