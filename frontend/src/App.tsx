@@ -11,7 +11,6 @@ import { Monitor } from "./pages/Monitor";
 import { Pipelines } from "./pages/Pipelines";
 import { Builder } from "./pages/pipelines/Builder";
 import { Compare } from "./pages/Compare";
-import { Users } from "./pages/Users";
 import { SetPasswordScreen } from "./pages/account/Password";
 import { ControlSetup } from "./pages/control/ControlSetup";
 
@@ -64,7 +63,7 @@ export default function App() {
                         <Route path="/pipelines/:id" element={<Only can="edit"><Builder /></Only>} />
                         <Route path="/compare" element={<Compare />} />
                         <Route path="/compare/:id" element={<Compare />} />
-                        <Route path="/users" element={<Only can="manageUsers"><Users /></Only>} />
+                        <Route path="/users" element={<Navigate to="/control/users" replace />} />{/* moved into Control & Setup */}
                         <Route path="/control" element={<Only can="edit"><ControlSetup /></Only>} />
                         <Route path="/control/:tab" element={<Only can="edit"><ControlSetup /></Only>} />
                         <Route path="*" element={<Home />} />

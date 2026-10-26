@@ -24,7 +24,8 @@ function generatePassword(): string {
   return Array.from(bytes, (b) => abc[b % abc.length]).join("");
 }
 
-export function Users() {
+/** The Users screen (superadmins); `embedded` inside Control & Setup, where the tab already names it. */
+export function Users({ embedded = false }: { embedded?: boolean }) {
   const { user: me } = useAuth();
   const toast = useToast();
   const [users, setUsers] = useState<UserAdminOut[] | null>(null);
@@ -52,11 +53,11 @@ export function Users() {
   }
 
   return (
-    <div style={{ padding: "24px 28px 48px", display: "flex", flexDirection: "column", gap: 16, maxWidth: 1200 }}>
+    <div style={{ padding: embedded ? 0 : "24px 28px 48px", display: "flex", flexDirection: "column", gap: 16, maxWidth: 1200 }}>
       <div style={{ display: "flex", alignItems: "flex-end", gap: 12, flexWrap: "wrap" }}>
         <div style={{ flex: 1, minWidth: 240 }}>
-          <h1 style={{ margin: 0, fontSize: 20, fontWeight: 600, letterSpacing: "-0.01em" }}>Users</h1>
-          <p style={{ margin: "4px 0 0", color: "var(--text-2)" }}>Who can sign in, and what each role can do.</p>
+          {!embedded && <h1 style={{ margin: 0, fontSize: 20, fontWeight: 600, letterSpacing: "-0.01em" }}>Users</h1>}
+          <p style={{ margin: embedded ? 0 : "4px 0 0", color: "var(--text-2)" }}>Who can sign in, and what each role can do.</p>
         </div>
         <Button variant="primary" icon="person_add" onClick={() => setAdding(true)}>Add user</Button>
       </div>

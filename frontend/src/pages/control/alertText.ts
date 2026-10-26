@@ -47,6 +47,8 @@ export const KIND: Record<AlertKind, { label: string; icon: string }> = {
   webhook: { label: "Webhook", icon: "webhook" },
 };
 
+const times = (n: number, what: string) => `${n} ${what}${n === 1 ? "" : "s"}`;
+
 export function listing(names: string[]): string {
   if (names.length <= 1) return names[0] || "";
   return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
@@ -77,8 +79,8 @@ export function describeRule(r: Pick<AlertRuleIn, "event" | "scope" | "options" 
     case "job_stalled": when = `When a job${of} stalls`; break;
     case "schedule_failed": when = `When the schedule can't start a pipeline${of}`; break;
     case "input_stale": when = `When a pipeline${of} gets no new file for ${o.hours ?? 24} h`; break;
-    case "connection_down": when = `When a connection${of} fails ${o.k ?? 2} health checks in a row${o.include_warn ? " (degraded counts)" : ""}`; break;
-    case "check_down": when = `When a service check${of} is down ${o.k ?? 2} runs in a row`; break;
+    case "connection_down": when = `When a connection${of} fails ${times(o.k ?? 2, "health check")} in a row${o.include_warn ? " (degraded counts)" : ""}`; break;
+    case "check_down": when = `When a service check${of} is down ${times(o.k ?? 2, "run")} in a row`; break;
     case "host_high": {
       const res = ((o.resources as string[]) || []).map((x) => (x === "cpu" ? "CPU" : x));
       when = `When ${listing(res) || "nothing"} stays above ${o.pct ? `${o.pct}%` : "the Monitor's warning level"} for ${o.minutes ?? 5} min`;

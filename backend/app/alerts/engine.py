@@ -301,7 +301,7 @@ def _connections(rules, *, s, now, muted, out, seen) -> None:
             streak, since = (c.bad_streak, c.bad_since) if warn else (c.err_streak, c.err_since)
             _see(r, Subject("connection", str(c.id), c.name, "#/monitor"), seen, s=s, bad=streak >= k,
                  hold=c.status != "ok", now=now, muted=muted, out=out, reason=c.note or c.status,
-                 since=aware(since), note=f"{streak} failed checks in a row")
+                 since=aware(since), note=f"{streak} failed check{'' if streak == 1 else 's'} in a row")
 
 
 def _checks(rules, *, s, now, muted, out, seen) -> None:
@@ -313,7 +313,7 @@ def _checks(rules, *, s, now, muted, out, seen) -> None:
                 continue
             _see(r, Subject("check", str(c.id), c.name, "#/monitor"), seen, s=s, bad=(c.fail_streak or 0) >= k,
                  hold=c.status != "up", now=now, muted=muted, out=out, reason=c.message,
-                 since=aware(c.fail_since), note=f"{c.fail_streak} failed runs in a row")
+                 since=aware(c.fail_since), note=f"{c.fail_streak} failed run{'' if c.fail_streak == 1 else 's'} in a row")
 
 
 def _host(rules, snapshot_fn, *, s, now, muted, out, seen) -> None:

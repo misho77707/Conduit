@@ -2,12 +2,14 @@ import { Navigate, useNavigate, useParams } from "react-router-dom";
 import { useCan, type Can } from "../../lib/auth";
 import { Icon } from "../../ui/Icon";
 import { AlertsTab } from "./Alerts";
+import { Users } from "../Users";
 
 /** Control & Setup: configuring Conduit itself (admins; Users for superadmins). Never starts or stops other tools. */
 interface Tab { id: string; label: string; icon: string; need: keyof Can; render: () => JSX.Element; }
 
 const TABS: Tab[] = [
   { id: "alerts", label: "Alerts", icon: "notifications", need: "edit", render: () => <AlertsTab /> },
+  { id: "users", label: "Users", icon: "group", need: "manageUsers", render: () => <Users embedded /> },
 ];
 
 export function ControlSetup() {

@@ -139,7 +139,8 @@ def webhook(m: Message, instance: str, sent_at: datetime) -> dict[str, Any]:
     """The documented webhook payload (README, Control & Setup)."""
     return {
         "version": 1, "status": m.status, "event": m.event, "title": m.title,
-        "rule": m.rule, "subject": m.subject, "since": m.since, "reason": m.reason,
+        "text": "\n".join(m.lines), "rule": m.rule, "subject": m.subject,
+        "since": m.since and m.since.replace("+00:00", "Z"), "reason": m.reason,
         "url": m.link, "items": m.items or None, "instance": instance,
         "sent_at": aware(sent_at).isoformat().replace("+00:00", "Z"),
     }

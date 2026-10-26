@@ -74,6 +74,7 @@ def test_webhook_payload_headers_and_hmac_signature(env, sink, msg):
     assert (p["version"], p["status"], p["event"], p["title"]) == (1, "firing", "job_failed", "Pipeline failed: nightly-orders")
     assert p["subject"] == {"kind": "pipeline", "id": "p1", "name": "nightly-orders"} and p["instance"] == "Conduit"
     assert p["url"] == "https://conduit.example/#/jobs/1" and p["sent_at"].endswith("Z")
+    assert p["text"] == "\n".join(msg.lines) and p["text"]
 
 
 def test_a_webhook_without_a_secret_is_unsigned(env, sink, msg):

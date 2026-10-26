@@ -22,7 +22,7 @@ function Checklist({ items, value, onChange, empty }: { items: Pick[]; value: st
       {items.map((it) => (
         <label key={it.id} className="hover-surface2" style={{ display: "flex", gap: 8, alignItems: "center", padding: "3px 6px", borderRadius: 4, cursor: "pointer" }}>
           <input type="checkbox" checked={value.includes(it.id)} onChange={(e) => onChange(e.target.checked ? [...value, it.id] : value.filter((x) => x !== it.id))} />
-          <span style={{ fontFamily: "'Geist Mono',monospace", fontSize: 12 }}>{it.label}</span>
+          <span>{it.label}</span>
         </label>
       ))}
     </div>
