@@ -33,9 +33,21 @@ def set_secrets(conn: Connection, secrets: dict[str, Any]) -> None:
 
 def apply_result(conn: Connection, result: TestResult) -> None:
     """Overwrite the connection's current state. History is intentionally not kept."""
+    now = utcnow()
+    # consecutive bad checks (and since when), for "connection down for K checks" alerts
+    if result.status == "err":
+        conn.err_since = conn.err_since if conn.err_streak else now
+        conn.err_streak = (conn.err_streak or 0) + 1
+    else:
+        conn.err_streak, conn.err_since = 0, None
+    if result.status != "ok":
+        conn.bad_since = conn.bad_since if conn.bad_streak else now
+        conn.bad_streak = (conn.bad_streak or 0) + 1
+    else:
+        conn.bad_streak, conn.bad_since = 0, None
     conn.status = result.status
     conn.latency_ms = result.latency_ms
-    conn.last_checked_at = utcnow()
+    conn.last_checked_at = now
     if result.ok:
         conn.server_version = result.version or conn.server_version
         conn.note = "Slow handshake" if result.degraded else None

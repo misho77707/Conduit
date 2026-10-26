@@ -819,6 +819,15 @@ class _Beat:
 
 def run_job(job_id: uuid.UUID | str) -> str:
     """Run (or resume) a job to completion in the calling thread. Returns the final status."""
+    status = _run_job(job_id)
+    if status in ("succeeded", "failed"):
+        from ..alerts.engine import job_finished
+
+        job_finished(job_id, status)  # never raises: alerts can't fail a job
+    return status
+
+
+def _run_job(job_id: uuid.UUID | str) -> str:
     jid = uuid.UUID(str(job_id))
     Session = get_sessionmaker()
     with Session() as s:

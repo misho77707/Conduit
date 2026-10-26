@@ -273,3 +273,115 @@ class PipelinePreviewOut(BaseModel):
     # combined sources: per-input rows staged (capped?) and their columns, the join's row count, notes
     combined: dict[str, Any] | None = None
     source_columns: list[dict[str, Any]] | None = None  # the join SQL's exact output schema
+
+
+# ---- alerts (Control & Setup) ------------------------------------------------------------------------------
+
+AlertKind = Literal["telegram", "slack", "email", "webhook"]
+AlertEvent = Literal["job_failed", "job_stalled", "schedule_failed", "input_stale", "connection_down", "check_down",
+                     "host_high", "compare_diff"]
+
+
+class AlertChannelIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    kind: AlertKind
+    config: dict[str, Any] = Field(default_factory=dict)  # telegram: chat_id; email: host, port, tls, user, from, to
+    secrets: dict[str, Any] = Field(default_factory=dict)  # bot_token / webhook_url / password / url, headers, signing_secret
+    enabled: bool = True
+
+
+class AlertChannelPatch(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=120)
+    config: dict[str, Any] | None = None
+    secrets: dict[str, Any] | None = None  # a blank or missing secret keeps the stored one
+    clear_secrets: list[str] = Field(default_factory=list)  # optional secrets to remove (webhook headers / signing secret)
+    enabled: bool | None = None
+
+
+class AlertChannelTestIn(AlertChannelIn):
+    id: uuid.UUID | None = None  # testing an edit: blank secrets are taken from this saved channel
+
+
+class AlertChannelOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    kind: AlertKind
+    config: dict[str, Any]
+    secrets_set: list[str]  # which secrets are stored (never their values)
+    enabled: bool
+    last_sent_at: datetime | None
+    last_error: str | None
+    rules: list[str]  # names of the rules that send here
+    created_at: datetime
+    updated_at: datetime
+
+
+class AlertRuleIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    event: AlertEvent
+    scope: dict[str, Any] = Field(default_factory=lambda: {"all": True})  # {"all": true} or {"pipelines": [ids], ...}
+    options: dict[str, Any] = Field(default_factory=dict)  # thresholds; defaults filled in (app/alerts/catalog.py)
+    channel_ids: list[uuid.UUID] = Field(default_factory=list)
+    enabled: bool = True
+
+
+class AlertRulePatch(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=120)
+    event: AlertEvent | None = None
+    scope: dict[str, Any] | None = None
+    options: dict[str, Any] | None = None
+    channel_ids: list[uuid.UUID] | None = None
+    enabled: bool | None = None
+
+
+class AlertRuleOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    event: AlertEvent
+    event_label: str
+    scope: dict[str, Any]
+    options: dict[str, Any]
+    channel_ids: list[uuid.UUID]
+    enabled: bool
+    firing: int  # subjects firing right now
+    created_at: datetime
+    updated_at: datetime
+
+
+class AlertTestIn(BaseModel):
+    channel_ids: list[uuid.UUID] = Field(min_length=1)
+    rule_name: str | None = None
+
+
+class AlertSendResult(BaseModel):
+    channel_id: uuid.UUID | None
+    name: str
+    ok: bool
+    error: str | None
+
+
+class AlertMuteIn(BaseModel):
+    until: datetime | None  # null = unmute now (one summary of what is still firing goes out)
+
+
+class AlertMuteOut(BaseModel):
+    until: datetime | None
+
+
+class ActiveAlertOut(BaseModel):
+    rule_id: uuid.UUID | None  # None for a viewer
+    rule_name: str
+    event: AlertEvent
+    event_label: str
+    subject_kind: str
+    subject_id: str | None  # None for a viewer
+    subject_label: str
+    since: datetime | None
+    fired_at: datetime | None
+    reason: str
+    link: str  # app page, e.g. "#/jobs/<id>"
+
+
+class ActiveAlertsOut(BaseModel):
+    muted_until: datetime | None
+    alerts: list[ActiveAlertOut]

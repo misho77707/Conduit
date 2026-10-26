@@ -1,8 +1,8 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import (JSON, BigInteger, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text,
-                        UniqueConstraint, Uuid)
+from sqlalchemy import (JSON, BigInteger, CheckConstraint, Column, DateTime, ForeignKey, Index, Integer, String, Table,
+                        Text, UniqueConstraint, Uuid)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -65,6 +65,11 @@ class Connection(Base):
     server_version: Mapped[str | None] = mapped_column(String(120), nullable=True)
     note: Mapped[str | None] = mapped_column(String(500), nullable=True)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Consecutive checks that ended `err` (and not `ok`: err or warn), and when that run started: alerts count these
+    err_streak: Mapped[int] = mapped_column(Integer, default=0)
+    err_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    bad_streak: Mapped[int] = mapped_column(Integer, default=0)
+    bad_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     owner_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     owner: Mapped[User | None] = relationship(back_populates="connections")
@@ -175,6 +180,8 @@ class ServiceCheck(Base):
     latency_ms: Mapped[float | None] = mapped_column(nullable=True)
     checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # a run is in progress
+    fail_streak: Mapped[int] = mapped_column(Integer, default=0)  # consecutive `down` runs (alerts count them)
+    fail_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     owner_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -269,3 +276,81 @@ class Comparison(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# ---- alerts (Control & Setup): current state only, no send history -------------------------------------
+
+alert_rule_channels = Table(
+    "alert_rule_channels", Base.metadata,
+    Column("rule_id", Uuid, ForeignKey("alert_rules.id", ondelete="CASCADE"), primary_key=True),
+    Column("channel_id", Uuid, ForeignKey("alert_channels.id", ondelete="CASCADE"), primary_key=True),
+)
+
+
+class AlertChannel(Base):
+    """Where alerts go: Telegram, Slack, email or a webhook. Only the last send attempt's result is kept."""
+
+    __tablename__ = "alert_channels"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(120), unique=True)
+    kind: Mapped[str] = mapped_column(String(20))  # telegram | slack | email | webhook
+    config: Mapped[dict] = mapped_column(JsonType, default=dict)  # non-secret settings (chat id, SMTP host, ...)
+    secret_enc: Mapped[str] = mapped_column(Text, default="")  # Fernet-encrypted JSON (token, webhook URL, password)
+    enabled: Mapped[bool] = mapped_column(default=True)
+    last_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    rules: Mapped[list["AlertRule"]] = relationship(secondary=alert_rule_channels, back_populates="channels")
+
+
+class AlertRule(Base):
+    """When to alert: one event, a scope (everything or picked subjects), thresholds, the channels to send to."""
+
+    __tablename__ = "alert_rules"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(120), unique=True)
+    event: Mapped[str] = mapped_column(String(30))  # see app/alerts/catalog.py
+    scope: Mapped[dict] = mapped_column(JsonType, default=dict)  # {"all": true} or {"pipelines": [...], ...}
+    options: Mapped[dict] = mapped_column(JsonType, default=dict)  # thresholds of the event
+    enabled: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    channels: Mapped[list[AlertChannel]] = relationship(secondary=alert_rule_channels, back_populates="rules",
+                                                        lazy="selectin")
+
+
+class AlertState(Base):
+    """One (rule, subject) that is bad right now: pending (not long enough yet), firing, or recovered while alerts
+    were muted after its break message went out. Deleted once nothing is left to remember: no history."""
+
+    __tablename__ = "alert_states"
+    __table_args__ = (UniqueConstraint("rule_id", "subject_kind", "subject_id", name="uq_alert_state"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    rule_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("alert_rules.id", ondelete="CASCADE"), index=True)
+    subject_kind: Mapped[str] = mapped_column(String(20))  # pipeline | job | connection | check | host
+    subject_id: Mapped[str] = mapped_column(String(200))
+    subject_label: Mapped[str] = mapped_column(String(300), default="")
+    link: Mapped[str] = mapped_column(String(300), default="")  # the app page, e.g. "#/jobs/<id>"
+    firing: Mapped[bool] = mapped_column(default=False)
+    bad_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # the condition began
+    fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reason: Mapped[str] = mapped_column(String(500), default="")
+    notified: Mapped[str] = mapped_column(String(10), default="none")  # none | firing: what the last message said
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class Setting(Base):
+    """Small key / value store: the alert mute today, the runtime settings overrides later."""
+
+    __tablename__ = "settings"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[dict | list | str | int | float | bool | None] = mapped_column(JsonType, nullable=True)
+    updated_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

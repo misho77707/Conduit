@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     monitor_disks: str = ""  # extra disks to show: "path[:label],path[:label]" (paths as seen inside the container)
     monitor_warn_pct: int = 85  # CPU / memory / disk level above which the monitor says "High"
     check_timeout_s: int = 8  # HTTP / TCP / docker service checks give up after this long
+
+    # Alerts (Control & Setup)
+    public_url: str = ""  # e.g. https://conduit.example.com: alert messages link to the right page; empty = no links
+    instance_name: str = "Conduit"  # shown in alert messages (and exports): tells two Conduits apart
+    alert_send_timeout_s: int = 10  # one attempt to reach Telegram / Slack / SMTP / a webhook
+    telegram_api_url: str = "https://api.telegram.org"  # tests point it at a local server
     docker_socket: str = "/var/run/docker.sock"  # "docker" checks read container state from here (mount read-only)
 
     @property

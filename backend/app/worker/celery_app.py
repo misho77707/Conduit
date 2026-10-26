@@ -26,6 +26,11 @@ celery_app.conf.update(
             "schedule": timedelta(seconds=5),  # each check has its own interval (10 s and up); this only looks what is due
             "options": {"expires": 5},
         },
+        "alerts-evaluate": {
+            "task": "conduit.alerts.evaluate",
+            "schedule": timedelta(seconds=30),  # connections, checks, host, stalled jobs, stale inputs; mute ends
+            "options": {"expires": 30},
+        },
         "pipelines-due": {
             "task": "conduit.pipelines.run_due",
             "schedule": timedelta(seconds=30),  # cron schedules are minute-grained at best; no need to poll faster

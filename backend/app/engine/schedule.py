@@ -93,20 +93,23 @@ def run_and_dispatch(pipeline_id) -> bool:
         if p is None:
             return False
         queued = False
+        problem: str | None = None  # why it couldn't start, for "schedule couldn't start" alerts
         user = _run_as(s, p)
         go, note = _worth_running(s, p)
         if not go:  # a remote source with nothing new: no job (it would only push real loads out of the Jobs list)
             p.last_checked_at, p.last_check_note = utcnow(), note[:500]
         elif user is None:
             log.error("pipeline %s is due but there is no active admin or superadmin to run it as", pipeline_id)
+            problem = "There is no active admin or superadmin to run it as"
         else:
             try:
                 _launch(s, p, user, trigger="schedule")
                 queued = True
                 if note:
                     p.last_checked_at, p.last_check_note = utcnow(), f"load started: {note}"[:500]
-            except Exception:  # noqa: BLE001 - a broken pipeline must never take the scheduler down
+            except Exception as e:  # noqa: BLE001 - a broken pipeline must never take the scheduler down
                 log.exception("scheduled run of pipeline %s (%r) failed to queue", pipeline_id, p.name)
+                problem = _why(e)
         # Always advance next_run_at, even on failure: a broken schedule waits for its next slot instead of
         # retrying every beat tick.
         try:
@@ -115,7 +118,21 @@ def run_and_dispatch(pipeline_id) -> bool:
             p.next_run_at = None  # the stored cron somehow went bad; stop firing until it's edited again
         p.schedule_claimed_at = None
         s.commit()
+    if go:
+        from ..alerts.engine import schedule_result
+
+        schedule_result(pipeline_id, problem)  # never raises
     return queued
+
+
+def _why(e: Exception) -> str:
+    from fastapi import HTTPException
+
+    from .runner import short_error
+
+    if isinstance(e, HTTPException):  # _dispatch: the queue (Redis) is down
+        return str(e.detail)
+    return short_error(e)
 
 
 def _worth_running(session: Session, p: Pipeline) -> tuple[bool, str]:
@@ -133,10 +150,26 @@ def _worth_running(session: Session, p: Pipeline) -> tuple[bool, str]:
         return False, f"check failed: {short_error(e)}"
 
 
+def due_without_preview(p: Pipeline, now: datetime | None = None) -> bool:
+    """Enabled, scheduled and due, but with no cached preview: is_due leaves it alone, so it never starts."""
+    now = now or utcnow()
+    if not (p.enabled and p.schedule) or p.output_columns:
+        return False
+    next_run = _aware(p.next_run_at)
+    return next_run is not None and next_run <= now
+
+
 def run_due(max_workers: int = 4) -> int:
     """Queue a run for every enabled, previewed pipeline whose schedule has come due. Called by beat."""
     with get_sessionmaker()() as s:
-        due = [p.id for p in s.scalars(select(Pipeline)) if is_due(p)]
+        pipes = list(s.scalars(select(Pipeline)))
+        due = [p.id for p in pipes if is_due(p)]
+        stuck = [p.id for p in pipes if due_without_preview(p)]
+    if stuck:
+        from ..alerts.engine import schedule_result
+
+        for pid in stuck:
+            schedule_result(pid, "It is due, but it has no cached preview: open it and refresh the preview")
     if not due:
         return 0
     with ThreadPoolExecutor(max_workers=min(max_workers, len(due)), thread_name_prefix="conduit-sched") as pool:

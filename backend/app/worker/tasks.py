@@ -43,6 +43,25 @@ def run_job_task(job_id: str) -> str:
     return run_job(job_id)
 
 
+@celery_app.task(name="conduit.alerts.evaluate")
+def evaluate_alerts() -> int:
+    """Check state-based alert rules (connections, checks, host, stalled jobs, stale inputs); end a mute that ran out."""
+    from ..alerts.engine import evaluate
+
+    return evaluate()
+
+
+@celery_app.task(name="conduit.alerts.send", bind=True, max_retries=2, acks_late=False)
+def send_alert_task(self, channel_id: str, payload: dict) -> str:
+    """Send one alert message to one channel; two retries, 10 s apart. Only the outcome is kept, on the channel."""
+    from ..alerts.delivery import RETRY_DELAY_S, attempt
+
+    err = attempt(channel_id, payload)
+    if err and self.request.retries < self.max_retries:
+        raise self.retry(countdown=RETRY_DELAY_S)
+    return err or "sent"
+
+
 @celery_app.task(name="conduit.compare.run")
 def run_comparison_task(comparison_id: str) -> str:
     """Compare a source with a target and store the differences (latest few comparisons only)."""

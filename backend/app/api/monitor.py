@@ -195,6 +195,7 @@ def update_check(check_id: uuid.UUID, body: CheckPatch, session: Session = Depen
         setattr(c, field, getattr(merged, field))
     if changed_what:  # the old result no longer describes this check
         c.status, c.message, c.latency_ms, c.checked_at = "pending", "waiting for first check", None, None
+        c.fail_streak, c.fail_since = 0, None
     session.commit()
     if c.enabled and (changed_what or switched_on):
         threading.Thread(target=chk.run_and_store, args=(c.id,), daemon=True, name=f"check-{str(c.id)[:8]}").start()

@@ -78,6 +78,21 @@ EXPECTED = {
     ("GET", "/api/compare/{cid}/export"): ADMIN,
     ("POST", "/api/compare/{cid}/cancel"): ADMIN,
     ("DELETE", "/api/compare/{cid}"): ADMIN,
+    # alerts (Control & Setup)
+    ("GET", "/api/alerts/channels"): ADMIN,
+    ("POST", "/api/alerts/channels"): ADMIN,
+    ("POST", "/api/alerts/channels/test"): ADMIN,
+    ("PATCH", "/api/alerts/channels/{channel_id}"): ADMIN,
+    ("DELETE", "/api/alerts/channels/{channel_id}"): ADMIN,
+    ("POST", "/api/alerts/channels/{channel_id}/test"): ADMIN,
+    ("GET", "/api/alerts/rules"): ADMIN,
+    ("POST", "/api/alerts/rules"): ADMIN,
+    ("PATCH", "/api/alerts/rules/{rule_id}"): ADMIN,
+    ("DELETE", "/api/alerts/rules/{rule_id}"): ADMIN,
+    ("POST", "/api/alerts/test"): ADMIN,
+    ("GET", "/api/alerts/mute"): ADMIN,
+    ("PUT", "/api/alerts/mute"): ADMIN,
+    ("GET", "/api/alerts/active"): VIEWER,
 }
 
 

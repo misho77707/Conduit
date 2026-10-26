@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import case, select, update
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
@@ -265,9 +265,14 @@ def run_and_store(check_id) -> bool:
                                query=c.query, verify_tls=c.verify_tls)
         s.rollback()  # do not sit in a transaction while the network call runs
     status, message, lat = run_check(snap)
+    now = utcnow()
+    down = status == "down"
     with Session() as s:
         s.execute(update(ServiceCheck).where(ServiceCheck.id == check_id).values(
-            status=status, message=message, latency_ms=lat, checked_at=utcnow(), claimed_at=None))
+            status=status, message=message, latency_ms=lat, checked_at=now, claimed_at=None,
+            # consecutive `down` runs and since when, for "check down for K runs" alerts (old values on the right)
+            fail_streak=(ServiceCheck.fail_streak + 1) if down else 0,
+            fail_since=case((ServiceCheck.fail_streak > 0, ServiceCheck.fail_since), else_=now) if down else None))
         s.commit()
     return True
 

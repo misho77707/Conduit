@@ -388,6 +388,9 @@ def run_comparison(cid: uuid.UUID | str) -> str:
         summary["seconds"] = round(time.monotonic() - started, 2)
         summary["options"] = spec.options.model_dump()
         _update(cid, status="succeeded", phase="Done", summary=summary, finished_at=utcnow(), heartbeat_at=utcnow())
+        from ..alerts.engine import comparison_finished
+
+        comparison_finished(cid)  # never raises
         return "succeeded"
     except Cancelled:
         shutil.rmtree(work, ignore_errors=True)
