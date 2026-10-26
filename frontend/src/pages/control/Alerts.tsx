@@ -25,7 +25,7 @@ function clock(iso: string): string {
   return d.toLocaleString([], sameDay ? { hour: "2-digit", minute: "2-digit" } : { weekday: "short", hour: "2-digit", minute: "2-digit" });
 }
 
-function Panel({ icon, title, sub, right, children }: { icon: string; title: string; sub?: string; right?: ReactNode; children: ReactNode }) {
+export function Panel({ icon, title, sub, right, children }: { icon: string; title: string; sub?: string; right?: ReactNode; children: ReactNode }) {
   return (
     <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 14px", borderBottom: "1px solid var(--border)" }}>

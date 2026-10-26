@@ -7,5 +7,7 @@ RUN npm run build
 
 FROM nginx:1.27-alpine
 COPY --from=build /srv/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# nginx.conf is a template: when the container starts, the image fills in the ${CONDUIT_*} variables (only those).
+ENV NGINX_ENVSUBST_FILTER=CONDUIT_ CONDUIT_UPLOAD_CEILING_MB=2048
+COPY nginx.conf /etc/nginx/templates/default.conf.template
 EXPOSE 80

@@ -592,3 +592,32 @@ export const alertsApi = {
   setMute: (until: string | null) => req<{ until: string | null }>("/alerts/mute", { method: "PUT", body: JSON.stringify({ until }) }),
   active: () => get<ActiveAlertsOut>("/alerts/active"), // every role (viewers: no ids)
 };
+
+// ---- settings (Control & Setup; admins) ----
+
+export interface SettingOut {
+  key: string;
+  env: string; // the .env variable, e.g. CONDUIT_KEEP_FINISHED_JOBS
+  group: string;
+  group_label: string;
+  label: string;
+  help: string;
+  cls: "runtime" | "restart"; // runtime: editable here; restart: set in .env, then restart
+  type: "int" | "float" | "text";
+  unit: string;
+  min: number | null;
+  max: number | null;
+  value: number | string; // the effective value
+  default: number | string;
+  env_value: number | string | null; // what .env sets, when it sets something other than the default
+  source: "ui" | "env" | "default";
+  note: string | null;
+  updated_by: string | null; // a UI override: who and when
+  updated_at: string | null;
+}
+
+export const settingsApi = {
+  list: () => get<SettingOut[]>("/settings"),
+  set: (key: string, value: number | string) => req<SettingOut>(`/settings/${key}`, { method: "PUT", body: JSON.stringify({ value }) }),
+  reset: (key: string) => del<SettingOut>(`/settings/${key}`),
+};

@@ -29,6 +29,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
+from ..runtime import current_settings
 from ..db import get_engine, get_sessionmaker
 from ..models import Connection, Job, JobSplit, Watermark, utcnow
 from ..connectors import category_of
@@ -485,9 +486,9 @@ def layout(prep: Prepared, *, execute_target: bool) -> Layout:
     for sp in splits:
         if sp.est_rows is None and total:
             sp.est_rows = total // len(splits)
-    cap = get_settings().max_workers_per_job
+    cap = current_settings().max_workers_per_job
     if prep.opts.workers > cap:
-        prep.notes.append(f"Workers limited to {cap} (CONDUIT_MAX_WORKERS_PER_JOB).")
+        prep.notes.append(f"Workers limited to {cap} (Settings: Workers per job, at most).")
     workers = max(1, min(prep.opts.workers, len(splits), cap))
     t = prep.spec.target
     ddl = prep.tgt.prepare_target(t.table, prep.target_cols, t.mode, t.keys, target_options(prep, total), t.create, execute_target)
@@ -965,7 +966,7 @@ def _run_job(job_id: uuid.UUID | str) -> str:
 
 def prune_finished() -> None:
     """Keep only the latest few finished jobs (no history)."""
-    keep = get_settings().keep_finished_jobs
+    keep = current_settings().keep_finished_jobs
     with get_sessionmaker()() as s:
         old = list(s.scalars(select(Job).where(Job.status.in_(("succeeded", "failed", "cancelled")))
                              .order_by(Job.finished_at.desc().nullslast(), Job.created_at.desc()).offset(keep)))

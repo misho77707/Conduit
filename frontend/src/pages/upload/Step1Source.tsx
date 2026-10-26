@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { connectionsApi, databasesOnly, filesApi, remoteApi, type FileEntry, type RemoteIn } from "../../lib/api";
+import { connectionsApi, databasesOnly, filesApi, remoteApi, settingsApi, type FileEntry, type RemoteIn } from "../../lib/api";
 import { MatchLine, RemotePicker } from "../remote/RemotePicker";
 import { useToast } from "../../lib/toast";
 import { fmtBytes, dbTile, fileFormatLabel, statusBadge } from "../../lib/format";
@@ -64,8 +64,16 @@ function UploadTab({ s, set, onInspected }: { s: WizardState; set: (p: Partial<W
   const toast = useToast();
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [limitMb, setLimitMb] = useState<number | null>(null); // Control & Setup > Settings: upload limit
+  useEffect(() => {
+    settingsApi.list().then((xs) => setLimitMb(Number(xs.find((x) => x.key === "upload_max_mb")?.value) || null)).catch(() => {});
+  }, []);
 
   async function upload(file: File) {
+    if (limitMb && file.size > limitMb * 1024 * 1024) {
+      toast("err", "Upload failed", `${file.name} is larger than the ${limitMb.toLocaleString()} MB upload limit (Control & Setup > Settings).`);
+      return;
+    }
     set({ uploadState: "uploading", uploadPct: 0, uploadedName: file.name });
     try {
       const res = await filesApi.upload(file, (pct) => set({ uploadPct: pct }));
@@ -92,7 +100,7 @@ function UploadTab({ s, set, onInspected }: { s: WizardState; set: (p: Partial<W
             <Icon name="upload_file" style={{ fontSize: 24 }} />
           </span>
           <span style={{ fontSize: 15, fontWeight: 500 }}>Drop a file here, or <span style={{ color: "var(--accent)" }}>browse</span></span>
-          <span style={{ color: "var(--text-3)", fontSize: 12 }}>Up to 2 GB per file</span>
+          <span style={{ color: "var(--text-3)", fontSize: 12 }}>{limitMb ? `Up to ${limitMb % 1024 === 0 ? `${limitMb / 1024} GB` : `${limitMb.toLocaleString()} MB`} per file` : "\u00a0"}</span>
         </button>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
           <span style={{ fontSize: 12, color: "var(--text-3)", marginRight: 4 }}>Supported</span>

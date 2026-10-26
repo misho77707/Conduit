@@ -72,14 +72,13 @@ async def list_dir(path: str = "") -> list[FileEntryOut]:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(e)) from e
 
 
-MAX_UPLOAD_MB = 2048
-
-
 @router.post("/upload", status_code=status.HTTP_201_CREATED)
 async def upload(file: UploadFile = File(...)) -> dict:
     """Browser upload: stored under <data dir>/uploads/<id>/ (an allowed root), ready for /files/inspect and a load job."""
     from ..config import get_settings
+    from ..runtime import current_settings
 
+    limit_mb = current_settings().upload_max_mb  # never above the ceiling nginx in front was started with
     name = re.sub(r"[^A-Za-z0-9._ -]", "_", Path(file.filename or "upload").name).strip(". ") or "upload"
     dest_dir = Path(get_settings().data_dir) / "uploads" / uuid.uuid4().hex[:12]
     dest = dest_dir / name
@@ -90,8 +89,8 @@ async def upload(file: UploadFile = File(...)) -> dict:
         with dest.open("wb") as out:
             while chunk := file.file.read(1024 * 1024):
                 size += len(chunk)
-                if size > MAX_UPLOAD_MB * 1024 * 1024:
-                    raise ValueError(f"File is larger than {MAX_UPLOAD_MB} MB")
+                if size > limit_mb * 1024 * 1024:
+                    raise ValueError(f"File is larger than {limit_mb:,} MB")
                 out.write(chunk)
         return size
 

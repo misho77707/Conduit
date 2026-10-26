@@ -1,6 +1,6 @@
 """A small on-disk cache under <data>/remote/cache/: files unpacked from .zip archives and remote files (or their
 first megabytes) fetched for previews. One folder per entry, keyed by what identifies the content (path + size +
-mtime / ETag), so a changed file gets a new entry. Capped by total size (CONDUIT_REMOTE_CACHE_MB); the least
+mtime / ETag), so a changed file gets a new entry. Capped by total size (remote_cache_mb, a runtime setting); the least
 recently used entries go first. Loads never read from here: a job downloads its own files.
 """
 from __future__ import annotations
@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 from .config import get_settings
+from .runtime import current_settings
 from .connectors.base import UserFacingError
 
 _lock = threading.Lock()
@@ -71,7 +72,7 @@ def target(key: str, name: str) -> Path:
 
 def evict(keep: Path | None = None) -> None:
     """Drop least recently used entries until the cache fits its cap."""
-    cap = get_settings().remote_cache_mb * 1024 * 1024
+    cap = current_settings().remote_cache_mb * 1024 * 1024
     with _lock:
         if not root().is_dir():
             return

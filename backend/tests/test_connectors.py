@@ -3,7 +3,7 @@ import socket
 import pytest
 
 from app.connectors import get_connector
-from app.connectors.base import SLOW_MS, Connector, TableSchema, parse_extra, redact
+from app.connectors.base import Connector, TableSchema, parse_extra, redact
 from app.connectors.mongo import mask_uri
 
 
@@ -22,7 +22,7 @@ def test_redact_and_parse_extra():
     assert parse_extra(None) == {}
 
 
-def test_slow_handshake_is_degraded(monkeypatch):
+def test_slow_handshake_is_degraded(env, monkeypatch):
     class Slow(Connector):
         type, label, abbr, kind = "slow", "Slow", "SL", "host"
         def _test(self):
@@ -33,8 +33,10 @@ def test_slow_handshake_is_degraded(monkeypatch):
             return TableSchema(name=table, columns=[])
 
     import time
-    ticks = iter([0.0, (SLOW_MS + 100) / 1000])
-    monkeypatch.setattr(time, "perf_counter", lambda: next(ticks))
+    from app.config import get_settings
+
+    ticks = iter([0.0, (get_settings().connection_slow_ms + 100) / 1000])
+    monkeypatch.setattr(time, "perf_counter", lambda: next(ticks, 99.0))
     r = Slow({}, {}).test()
     assert r.ok and r.degraded and r.status == "warn"
 

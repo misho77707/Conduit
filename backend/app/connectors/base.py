@@ -12,9 +12,6 @@ from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from typing import Any, ClassVar
 
-SLOW_MS = 500  # handshake slower than this is reported as "degraded"
-
-
 @dataclass
 class TestResult:
     __test__ = False  # not a pytest class
@@ -127,6 +124,14 @@ class NotADatabase(UserFacingError, ValueError):
     """A file-storage connection was used where a database is needed."""
 
 
+def _slow_ms() -> int:
+    """A handshake slower than this is reported as "degraded" (a runtime setting, imported late so connectors load
+    without the app's models)."""
+    from ..runtime import current_settings
+
+    return current_settings().connection_slow_ms
+
+
 class Connector(ABC):
     type: ClassVar[str]
     label: ClassVar[str]
@@ -174,7 +179,7 @@ class Connector(ABC):
         latency = (time.perf_counter() - start) * 1000
         return TestResult(
             ok=True, latency_ms=round(latency, 1), version=version, detail=detail,
-            degraded=latency > SLOW_MS, learned=dict(self.learned),
+            degraded=latency > _slow_ms(), learned=dict(self.learned),
         )
 
     @abstractmethod

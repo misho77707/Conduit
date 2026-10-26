@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 
 from ..config import get_settings
+from ..runtime import current_settings
 from . import messages
 from .messages import Message
 
@@ -100,7 +101,7 @@ def check_channel(kind: str, config: dict[str, Any], secrets: dict[str, Any]) ->
 # ---- sending ----------------------------------------------------------------------------------------------
 
 def _post(url: str, body: bytes, headers: dict[str, str]) -> httpx.Response:
-    with httpx.Client(timeout=get_settings().alert_send_timeout_s, follow_redirects=False) as c:
+    with httpx.Client(timeout=current_settings().alert_send_timeout_s, follow_redirects=False) as c:
         return c.post(url, content=body, headers={"Content-Type": "application/json", "User-Agent": "Conduit-Alerts/1", **headers})
 
 
@@ -129,7 +130,7 @@ def sign(secret: str, body: bytes) -> str:
 
 
 def _webhook(config: dict[str, Any], secrets: dict[str, Any], m: Message) -> None:
-    payload = messages.webhook(m, get_settings().instance_name, datetime.now(timezone.utc))
+    payload = messages.webhook(m, current_settings().instance_name, datetime.now(timezone.utc))
     body = json.dumps(payload, separators=(",", ":")).encode()
     headers = dict(secrets.get("headers") or {})
     if secrets.get("signing_secret"):
@@ -140,13 +141,13 @@ def _webhook(config: dict[str, Any], secrets: dict[str, Any], m: Message) -> Non
 
 
 def _email(config: dict[str, Any], secrets: dict[str, Any], m: Message) -> None:
-    instance = get_settings().instance_name
+    instance = current_settings().instance_name
     subject, text, html_body = messages.email(m, instance)
     msg = EmailMessage()
     msg["Subject"], msg["From"], msg["To"] = subject, config["from"], ", ".join(config["to"])
     msg.set_content(text)
     msg.add_alternative(html_body, subtype="html")
-    timeout = get_settings().alert_send_timeout_s
+    timeout = current_settings().alert_send_timeout_s
     host, port, tls = config["host"], int(config["port"]), config.get("tls", "starttls")
     smtp: smtplib.SMTP = (smtplib.SMTP_SSL(host, port, timeout=timeout, context=ssl.create_default_context())
                           if tls == "ssl" else smtplib.SMTP(host, port, timeout=timeout))

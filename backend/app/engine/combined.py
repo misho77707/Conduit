@@ -21,7 +21,7 @@ import duckdb
 import pyarrow as pa
 from sqlalchemy.orm import Session
 
-from ..config import get_settings
+from ..runtime import current_settings
 from ..connectors.base import UserFacingError
 from .filesource import MultiFileAdapter
 from .model import Batch, ReadRequest, SplitSpec
@@ -228,7 +228,7 @@ class CombinedPreview:
 def preview(session: Session, c: CombinedIn, sample_rows: int) -> CombinedPreview:
     """Stage every input with a row cap (in memory), run the SQL over the sample. The schema is exact even when the
     sample has no matching rows; notes say which inputs were capped."""
-    cap = get_settings().combined_preview_rows
+    cap = current_settings().combined_preview_rows
     warnings = check(c)
     inputs, labels = [], {}
     for inp in c.inputs:

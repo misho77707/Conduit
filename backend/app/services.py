@@ -5,7 +5,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .config import get_settings
+from .runtime import current_settings
 from .connectors import Connector, category_of, get_connector
 from .connectors.base import TestResult
 from .models import Connection, utcnow
@@ -15,7 +15,7 @@ from .security import SecretKeyError, decrypt_secrets, encrypt_secrets
 
 def build_connector(conn: Connection) -> Connector:
     secrets = decrypt_secrets(conn.secret_enc)
-    return get_connector(conn.type, conn.config or {}, secrets, timeout=get_settings().connect_timeout_s)
+    return get_connector(conn.type, conn.config or {}, secrets, timeout=current_settings().connect_timeout_s)
 
 
 def serialize(conn: Connection) -> ConnectionOut:

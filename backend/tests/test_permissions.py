@@ -93,6 +93,10 @@ EXPECTED = {
     ("GET", "/api/alerts/mute"): ADMIN,
     ("PUT", "/api/alerts/mute"): ADMIN,
     ("GET", "/api/alerts/active"): VIEWER,
+    # settings (Control & Setup)
+    ("GET", "/api/settings"): ADMIN,
+    ("PUT", "/api/settings/{key}"): ADMIN,
+    ("DELETE", "/api/settings/{key}"): ADMIN,
 }
 
 

@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from ..config import get_settings
+from ..runtime import current_settings
 from ..connectors.http import mask_url
 
 EXCERPT = 500
@@ -74,7 +74,7 @@ def clean(text: str | None, limit: int = EXCERPT) -> str:
 
 def absolute(path: str | None) -> str | None:
     """"#/jobs/<id>" -> "https://conduit.example/#/jobs/<id>", or None without a public_url."""
-    base = (get_settings().public_url or "").strip().rstrip("/")
+    base = (current_settings().public_url or "").strip().rstrip("/")
     return f"{base}/{path.lstrip('/')}" if base and path else None
 
 
@@ -147,6 +147,6 @@ def webhook(m: Message, instance: str, sent_at: datetime) -> dict[str, Any]:
 
 
 def test_message(rule_name: str | None = None) -> Message:
-    title = f"Test from {get_settings().instance_name}" + (f": {rule_name}" if rule_name else "")
+    title = f"Test from {current_settings().instance_name}" + (f": {rule_name}" if rule_name else "")
     return Message(status="test", title=title, lines=["If you can read this, alerts reach this channel."],
                    link=absolute("#/control"), link_label="Open Control & Setup")

@@ -25,6 +25,7 @@ import duckdb
 from sqlalchemy import select
 
 from ..config import get_settings
+from ..runtime import current_settings
 from ..db import get_sessionmaker
 from ..engine import staging
 from ..engine.staging import StageInput
@@ -439,7 +440,7 @@ def _execute(cid: uuid.UUID, spec: CompareIn, r: Resolved, work: Path) -> dict[s
 
 def prune() -> None:
     """Keep only the latest few finished comparisons (no history), with their result files."""
-    keep = get_settings().keep_comparisons
+    keep = current_settings().keep_comparisons
     with get_sessionmaker()() as s:
         old = list(s.scalars(select(Comparison).where(Comparison.status.in_(FINISHED))
                              .order_by(Comparison.finished_at.desc().nullslast(), Comparison.created_at.desc()).offset(keep)))

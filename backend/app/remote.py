@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 
 from . import filecache
 from .config import get_settings
+from .runtime import current_settings
 from .connectors import category_of
 from .connectors.http import HTTPConnector, mask_text, mask_url
 from .connectors.storage import RangeNotSupported, RemoteEntry, RemoteError, StorageConnector, has_glob
@@ -59,7 +60,7 @@ class NothingToLoad(RemoteError):
 
 def storage(session: Session, connection_id: uuid.UUID | None) -> tuple[StorageConnector, Connection | None]:
     """The storage connector for a remote source (an ad-hoc URL when there is no connection)."""
-    timeout = get_settings().remote_timeout_s
+    timeout = current_settings().remote_timeout_s
     if connection_id is None:
         return HTTPConnector({"base_url": ""}, {}, timeout=min(timeout, 30)), None
     conn = session.get(Connection, connection_id)
@@ -146,7 +147,7 @@ class Match:
     status: dict[str, str] = field(default_factory=dict)  # full -> new | changed | loaded (when the target is known)
     skip: bool = False
     notes: list[str] = field(default_factory=list)
-    more_left: int = 0  # new files beyond CONDUIT_REMOTE_MAX_FILES, left for the next run
+    more_left: int = 0  # new files beyond remote_max_files, left for the next run
     unsupported: int = 0
 
     def summary(self, c: StorageConnector) -> dict[str, Any]:
@@ -175,7 +176,7 @@ def _name_format(name: str) -> tuple[str | None, str | None]:
 
 def resolve_match(c: StorageConnector, remote: RemoteIn, loaded: dict[str, set[str]] | None, skip: bool) -> Match:
     """What `remote` matches right now, and which files a run would load (`skip` leaves out loaded ones)."""
-    st = get_settings()
+    st = current_settings()
     if remote.match == "exact":
         e = c.info(remote.path)
         if e.is_dir:
@@ -212,7 +213,7 @@ def resolve_match(c: StorageConnector, remote: RemoteIn, loaded: dict[str, set[s
     if len(todo) > st.remote_max_files:
         if not m.skip:
             raise RemoteError(f"{remote.path} matches {len(todo):,} files; one run loads at most {st.remote_max_files:,} "
-                              "(CONDUIT_REMOTE_MAX_FILES). Narrow the pattern, or turn on 'skip files already loaded' "
+                              "(Settings: Files per run). Narrow the pattern, or turn on 'skip files already loaded' "
                               "to load them over several runs.")
         m.more_left = len(todo) - st.remote_max_files
         todo = todo[: st.remote_max_files]
@@ -297,7 +298,7 @@ class Preview:
 
 def preview_file(c: StorageConnector, e: RemoteEntry, fmt: str | None) -> Preview:
     """A local copy (or sample) of a remote file that is cheap to inspect, from the cache when possible."""
-    st = get_settings()
+    st = current_settings()
     inner, comp = split_compression(e.name)
     if fmt is None and comp != "zip":
         fmt = _name_format(e.name)[0]
@@ -450,12 +451,12 @@ def remove_job_dir(job_id: uuid.UUID | str) -> None:
 
 def _download_all(c: StorageConnector, entries: list[RemoteEntry], dest: Path, what: str,
                   job_id: uuid.UUID | None = None) -> list[dict[str, Any]]:
-    st = get_settings()
+    st = current_settings()
     cap = st.remote_max_file_mb * 1024 * 1024
     too_big = [e for e in entries if (e.size or 0) > cap]
     if too_big:
         raise RemoteError(f"{too_big[0].path} is {too_big[0].size / 1024 ** 2:,.0f} MB: more than the "
-                          f"{st.remote_max_file_mb:,} MB limit per file (CONDUIT_REMOTE_MAX_FILE_MB)")
+                          f"{st.remote_max_file_mb:,} MB limit per file (Settings: Remote file, at most)")
     files_dir = dest / "files"
     files_dir.mkdir(parents=True, exist_ok=True)
     filecache.ensure_space(files_dir, sum(e.size or 0 for e in entries), what)
@@ -502,7 +503,7 @@ def job_source(session: Session, job_id: uuid.UUID, remote: RemoteIn, tkey: str,
                 if e.version != rec["version"]:
                     raise RemoteError(f"{rec['label']} changed on the server since this job started, and its downloaded "
                                       "copy is gone: start a new load instead of retrying")
-                c.download(rec["path"], local, get_settings().remote_max_file_mb * 1024 * 1024)
+                c.download(rec["path"], local, current_settings().remote_max_file_mb * 1024 * 1024)
         notes = data.get("notes", [])
     else:
         skip, skip_note = effective_skip(remote, target_mode)

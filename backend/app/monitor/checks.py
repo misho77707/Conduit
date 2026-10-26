@@ -19,12 +19,12 @@ from sqlalchemy import case, select, update
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
+from ..runtime import current_settings
 from ..db import get_sessionmaker
 from ..models import Connection, ServiceCheck, utcnow
 
 log = logging.getLogger("conduit.monitor")
 
-SLOW_MS = 2000  # answered, but slower than this: "warn"
 QUERY_TIMEOUT_S = 15
 STALE_CLAIM_S = 60  # a run that claimed a check and never finished (killed worker) is retried after this
 
@@ -73,7 +73,7 @@ def check_http(check) -> Outcome:
     req = urllib.request.Request(check.target, headers={"User-Agent": "conduit-monitor"})
     t0 = time.perf_counter()
     try:
-        with opener.open(req, timeout=get_settings().check_timeout_s) as resp:
+        with opener.open(req, timeout=current_settings().check_timeout_s) as resp:
             code = resp.status
     except urllib.error.HTTPError as e:  # 3xx / 4xx / 5xx
         code = e.code
@@ -84,7 +84,7 @@ def check_http(check) -> Outcome:
     label = f"{code} {phrase}".strip()
     if code != expect:
         return Outcome("down", f"{label}, expected {expect}", lat)
-    if lat > SLOW_MS:
+    if lat > current_settings().check_slow_ms:
         return Outcome("warn", f"{label}, slow", lat)
     return Outcome("up", label, lat)
 
@@ -101,7 +101,7 @@ def check_tcp(check) -> Outcome:
     limit = float(check.expect or 1000)
     t0 = time.perf_counter()
     try:
-        socket.create_connection((host, port), timeout=get_settings().check_timeout_s).close()
+        socket.create_connection((host, port), timeout=current_settings().check_timeout_s).close()
     except Exception as e:  # noqa: BLE001
         return Outcome("down", _reason(e))
     lat = _ms(t0)
@@ -144,7 +144,7 @@ def check_query(check) -> Outcome:
     label = f"{n} row" + ("" if n == 1 else "s")
     if check.expect != "" and n != int(check.expect):
         return Outcome("down", f"{label}, expected {int(check.expect)}", lat)
-    if lat > SLOW_MS:
+    if lat > current_settings().check_slow_ms:
         return Outcome("warn", f"{label}, slow", lat)
     return Outcome("up", label, lat)
 
@@ -164,7 +164,7 @@ class _UnixHTTPConnection(http.client.HTTPConnection):
 
 def _docker_get(path: str) -> tuple[int, dict | None]:
     """GET a path from the Docker Engine API over its unix socket. Returns (status, parsed JSON body or None)."""
-    conn = _UnixHTTPConnection(get_settings().docker_socket, get_settings().check_timeout_s)
+    conn = _UnixHTTPConnection(get_settings().docker_socket, current_settings().check_timeout_s)
     try:
         conn.request("GET", path, headers={"Host": "localhost"})
         resp = conn.getresponse()

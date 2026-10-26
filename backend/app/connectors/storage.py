@@ -231,7 +231,7 @@ class StorageConnector(Connector):
                     n += len(chunk)
                     if n > max_bytes:
                         raise RemoteError(f"{posixpath.basename(path)} is larger than the {max_bytes // 1024 // 1024:,} MB "
-                                          "limit (CONDUIT_REMOTE_MAX_FILE_MB)")
+                                          "limit (Settings: Remote file, at most)")
                     out.write(chunk)
         except BaseException:
             part.unlink(missing_ok=True)

@@ -4,7 +4,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="CONDUIT_", env_file=".env", extra="ignore")
+    """The environment's view (.env / CONDUIT_* variables), read once. Every field declares a class in
+    app/runtime.py SPECS (runtime / restart / hidden); runtime ones are read through current_settings()."""
+
+    # An empty variable (compose passes `${CONDUIT_X:-}`) means "not set": the default below applies.
+    model_config = SettingsConfigDict(env_prefix="CONDUIT_", env_file=".env", extra="ignore", env_ignore_empty=True)
 
     # App storage (connections, users, job state)
     database_url: str = "postgresql+psycopg://conduit:conduit@localhost:5432/conduit"
@@ -38,6 +42,11 @@ class Settings(BaseSettings):
     max_workers_per_job: int = 32
     keep_comparisons: int = 10  # only the latest finished source/target comparisons (and their result files) are kept
 
+    # Browser uploads. The ceiling is nginx's client_max_body_size, set when the frontend container starts (both
+    # containers read CONDUIT_UPLOAD_CEILING_MB); the upload limit can be lowered at runtime, never above it.
+    upload_max_mb: int = 2048
+    upload_ceiling_mb: int = 2048
+
     # Remote intake (S3 / SFTP / HTTP files) and compressed files
     remote_timeout_s: int = 60  # per request to a remote server (a download streams; this is the idle limit)
     remote_max_file_mb: int = 20_480  # one remote file (or one file unpacked from a .zip) may not be bigger than this
@@ -57,6 +66,8 @@ class Settings(BaseSettings):
     monitor_disks: str = ""  # extra disks to show: "path[:label],path[:label]" (paths as seen inside the container)
     monitor_warn_pct: int = 85  # CPU / memory / disk level above which the monitor says "High"
     check_timeout_s: int = 8  # HTTP / TCP / docker service checks give up after this long
+    connection_slow_ms: int = 500  # a connection handshake slower than this is reported as "degraded"
+    check_slow_ms: int = 2000  # a service check that answers slower than this is "warn"
 
     # Alerts (Control & Setup)
     public_url: str = ""  # e.g. https://conduit.example.com: alert messages link to the right page; empty = no links

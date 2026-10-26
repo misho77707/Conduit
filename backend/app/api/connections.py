@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..config import get_settings
+from ..runtime import current_settings
 from ..connectors import REGISTRY, UnknownConnectorType, category_of, db_types, get_connector
 from ..db import get_session
 from ..deps import admin_only
@@ -80,7 +80,7 @@ def create_connection(
 async def test_unsaved(body: ConnectionTestIn) -> TestResultOut:
     """Test settings before saving. Nothing is stored."""
     _validate(body.type, body.config, body.secrets)
-    connector = get_connector(body.type, body.config, body.secrets, timeout=get_settings().connect_timeout_s)
+    connector = get_connector(body.type, body.config, body.secrets, timeout=current_settings().connect_timeout_s)
     return TestResultOut(**(await run_in_threadpool(connector.test)).to_dict())
 
 

@@ -1,7 +1,7 @@
 """Stream mode of a combined pipeline source: one big driver input streamed, small lookups held in memory.
 
 The lookups (every input but the driver) are read once per job into an in-process DuckDB, each capped in rows and
-the whole in memory (CONDUIT_COMBINED_LOOKUP_MAX_ROWS / _MB): a bigger lookup fails the job early and points to
+the whole in memory (combined_lookup_max_rows / _mb, a runtime setting): a bigger lookup fails the job early and points to
 staged mode. The driver is never copied: each of its batches is registered under the driver's alias and the SQL
 runs over it, so the SQL must keep each driver row's result independent of other batches (checked cheaply when
 the pipeline is saved: no GROUP BY / DISTINCT / window / aggregate / LIMIT at the top level).
@@ -18,7 +18,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 from sqlalchemy.orm import Session
 
-from ..config import get_settings
+from ..runtime import current_settings
 from ..models import Job
 from . import joblog
 from .arrowconv import conform
@@ -44,7 +44,7 @@ def _memory_mb(con: duckdb.DuckDBPyConnection) -> float:
 
 def stream_source(session: Session, spec: JobIn, job: Job) -> "StreamSource":
     c = spec.source.combined
-    st = get_settings()
+    st = current_settings()
     d = job_dir(job.id)
     lookups, driver = [], None
     for inp in c.inputs:
@@ -68,7 +68,7 @@ def stream_source(session: Session, spec: JobIn, job: Job) -> "StreamSource":
     def guard(si: StageInput) -> None:
         if _memory_mb(con) > st.combined_lookup_max_mb:
             raise CombinedError(f"The lookups take more than {st.combined_lookup_max_mb:,} MB of memory while reading "
-                                f"{si.table} (CONDUIT_COMBINED_LOOKUP_MAX_MB): use staged mode for big inputs")
+                                f"{si.table} (Settings: Stream-mode lookup memory): use staged mode for big inputs")
 
     est = {si.table: estimate(si) for si in lookups}
     try:
@@ -84,7 +84,7 @@ def stream_source(session: Session, spec: JobIn, job: Job) -> "StreamSource":
     for alias in res.capped:
         con.close()
         raise CombinedError(f"Lookup {alias} has more than {st.combined_lookup_max_rows:,} rows "
-                            "(CONDUIT_COMBINED_LOOKUP_MAX_ROWS): use staged mode, or narrow it with a WHERE / column subset")
+                            "(Settings: Stream-mode lookup rows): use staged mode, or narrow it with a WHERE / column subset")
     for alias, n in res.rows.items():
         joblog.push(job.id, "info", f"lookup {alias}: {n:,} rows in memory")
     req = driver_request(c, dsrc, inp.source, wm_col, lo) if c.watermark else None

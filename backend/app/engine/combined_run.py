@@ -29,6 +29,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
+from ..runtime import current_settings
 from ..db import get_sessionmaker
 from ..filecache import NotEnoughSpace
 from ..models import Job, Watermark, utcnow
@@ -60,7 +61,7 @@ def remove_job_dir(job_id: uuid.UUID | str) -> None:
 
 def _floor_bytes(path: Path) -> tuple[int, int, int]:
     """(free, floor, total) for the disk `path` is on. The floor is the larger of the GB and % settings."""
-    st = get_settings()
+    st = current_settings()
     probe = path
     while not probe.exists() and probe != probe.parent:
         probe = probe.parent
@@ -74,7 +75,7 @@ def check_floor(path: Path, what: str) -> None:
     if free < floor:
         gb = 1024 ** 3
         raise NotEnoughSpace(f"Stopped {what}: the data folder is down to {free / gb:,.1f} GB free, below the "
-                             f"{floor / gb:,.1f} GB floor (CONDUIT_COMBINED_MIN_FREE_GB / _PCT). Free some space, read fewer "
+                             f"{floor / gb:,.1f} GB floor (Settings: Keep free on the data disk). Free some space, read fewer "
                              "rows or columns per input (WHERE / column subset), or use stream mode.")
 
 

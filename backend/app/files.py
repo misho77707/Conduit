@@ -117,12 +117,12 @@ def materialize(path: Path, unpack_dir: Path | None = None) -> Path:
     if split_compression(path.name)[1] != "zip":
         return path
     from . import filecache
-    from .config import get_settings
+    from .runtime import current_settings
 
     m = zip_member(path)
     st = path.stat()
     name = posixpath.basename(m.filename)
-    cap = get_settings().remote_max_file_mb * 1024 * 1024
+    cap = current_settings().remote_max_file_mb * 1024 * 1024
     if m.file_size > cap:
         raise UnsupportedFormat(f"{name} inside {path.name} is larger than the {cap // 1024 // 1024:,} MB limit")
     if unpack_dir is not None:

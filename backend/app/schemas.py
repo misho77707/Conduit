@@ -385,3 +385,30 @@ class ActiveAlertOut(BaseModel):
 class ActiveAlertsOut(BaseModel):
     muted_until: datetime | None
     alerts: list[ActiveAlertOut]
+
+
+# ---- settings (Control & Setup) -------------------------------------------------------------------------------
+
+class SettingOut(BaseModel):
+    key: str
+    env: str  # the .env variable, e.g. CONDUIT_KEEP_FINISHED_JOBS
+    group: str
+    group_label: str
+    label: str
+    help: str
+    cls: Literal["runtime", "restart"]  # runtime: editable here; restart: set in .env, then restart
+    type: Literal["int", "float", "text"]
+    unit: str
+    min: float | None
+    max: float | None
+    value: Any  # the effective value
+    default: Any
+    env_value: Any = None  # what .env sets, when it sets something other than the default
+    source: Literal["ui", "env", "default"]
+    note: str | None = None
+    updated_by: str | None = None  # a UI override: who and when
+    updated_at: datetime | None = None
+
+
+class SettingIn(BaseModel):
+    value: Any  # checked against the setting's type and bounds (422 with a one-line reason)

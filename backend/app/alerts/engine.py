@@ -22,7 +22,7 @@ from typing import Any, Callable
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..config import get_settings
+from ..runtime import current_settings
 from ..db import get_sessionmaker
 from ..models import (AlertRule, AlertState, Comparison, Connection, Job, Pipeline, RemoteLoad, ServiceCheck,
                       Setting, utcnow)
@@ -329,7 +329,7 @@ def _host(rules, snapshot_fn, *, s, now, muted, out, seen) -> None:
         return
     items = {"memory": [("memory", "Memory", snap["memory"]["percent"])], "cpu": [("cpu", "CPU", snap["cpu"]["percent"])],
              "disk": [(f"disk:{d['label']}", f"Disk {d['label']}", d["percent"]) for d in snap.get("disks", [])]}
-    default_pct = get_settings().monitor_warn_pct
+    default_pct = current_settings().monitor_warn_pct
     for r in rules:
         opts = r.options or {}
         pct, minutes = opts.get("pct") or default_pct, int(opts.get("minutes", 5))
@@ -337,7 +337,7 @@ def _host(rules, snapshot_fn, *, s, now, muted, out, seen) -> None:
             for sid, label, value in items.get(res, []):
                 _see(r, Subject("host", sid, label, "#/monitor"), seen, s=s, bad=value >= pct,
                      for_at_least=timedelta(minutes=minutes), now=now, muted=muted, out=out,
-                     reason=f"{label} at {value:.0f}% (threshold {pct}%)", note=f"Above {pct}% for {minutes} min")
+                     reason=f"{label} at {value:.0f}% (threshold {pct}%)", note=f"Above {pct}%" + (f" for {minutes} min" if minutes else ""))
 
 
 def _stalled(rules, *, s, now, muted, out, seen) -> None:

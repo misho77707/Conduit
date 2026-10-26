@@ -2,6 +2,7 @@ import { Navigate, useNavigate, useParams } from "react-router-dom";
 import { useCan, type Can } from "../../lib/auth";
 import { Icon } from "../../ui/Icon";
 import { AlertsTab } from "./Alerts";
+import { SettingsTab } from "./Settings";
 import { Users } from "../Users";
 
 /** Control & Setup: configuring Conduit itself (admins; Users for superadmins). Never starts or stops other tools. */
@@ -10,6 +11,7 @@ interface Tab { id: string; label: string; icon: string; need: keyof Can; render
 const TABS: Tab[] = [
   { id: "alerts", label: "Alerts", icon: "notifications", need: "edit", render: () => <AlertsTab /> },
   { id: "users", label: "Users", icon: "group", need: "manageUsers", render: () => <Users embedded /> },
+  { id: "settings", label: "Settings", icon: "settings", need: "edit", render: () => <SettingsTab /> },
 ];
 
 export function ControlSetup() {
@@ -24,7 +26,7 @@ export function ControlSetup() {
     <div style={{ padding: "24px 28px 48px", display: "flex", flexDirection: "column", gap: 16, maxWidth: 1280 }}>
       <div>
         <h1 style={{ margin: 0, fontSize: 20, fontWeight: 600, letterSpacing: "-0.01em" }}>Control &amp; Setup</h1>
-        <p style={{ margin: "4px 0 0", color: "var(--text-2)" }}>How Conduit itself behaves: who hears about problems, and how.</p>
+        <p style={{ margin: "4px 0 0", color: "var(--text-2)" }}>How Conduit itself behaves: who hears about problems, who can sign in, and its limits.</p>
       </div>
       <div role="tablist" style={{ display: "flex", gap: 4, borderBottom: "1px solid var(--border)" }}>
         {tabs.map((t) => {
