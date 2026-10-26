@@ -17,7 +17,9 @@ can (wizard, pipelines including schedules, Compare), one file / the newest matc
 skip-already-loaded; `.gz` and `.zip` work for local and remote files alike.
 **Users and roles**: superadmins manage accounts; admins do everything else; viewers only look (Monitor,
 Jobs, the pipeline list, comparison counts), enforced by the API on every route.
-Not yet built: a watched folder, Avro/ORC, and Control & Setup.
+**Control & Setup**: alerts to Telegram, Slack, email and webhooks on eight events (one message when something
+breaks, one when it recovers, a mute), the Users screen, runtime Settings, and export / import between Conduits.
+Not yet built: a watched folder, Avro/ORC.
 
 ## Run it
 
@@ -37,7 +39,7 @@ docker compose up --build
 - First sign-in: user `admin` (`CONDUIT_ADMIN_USER`), a **superadmin**. The password is `CONDUIT_ADMIN_PASSWORD`,
   or, if you left it empty, a temporary one printed once (`docker compose logs api | grep "generated password"`)
   that you replace at that first sign-in. Both variables are read only while the users table is empty: after
-  that, add and manage people on the **Users** screen (see Users and roles).
+  that, add and manage people in **Control & Setup > Users** (see Users and roles).
 - Files for SQLite/DuckDB connections, uploads and reject files live in `./data` (mounted at `/data`).
   File connections and file loads can only open paths inside `/data`. The containers run as uid/gid 1000
   (the WSL default); if `ls -n data` shows another owner, set `CONDUIT_UID` / `CONDUIT_GID` in `.env`.
@@ -51,13 +53,19 @@ backend/app/
   users.py           password and username rules, the last-superadmin rule, deleting a user but not their work
   labels.py          readable source / target names ("orders (prod-pg)") for screens that don't get the spec
   config.py          settings (env vars, prefix CONDUIT_)
+  runtime.py         each setting's class (runtime / restart / hidden); the values saved in Settings, over .env
+  transfer.py        export / import: the file, passphrase-encrypted secrets, the dry run, apply
   security.py        scrypt passwords, JWT, Fernet credential encryption
   models.py          users, connections (current health state lives on the row), jobs, service checks
   services.py        test/serialize/encrypt helpers shared by API and worker
   files.py           file inspect: columns, row estimate, preview (DuckDB + openpyxl); .gz / .zip handling
   remote.py          remote intake: matching, skip-loaded, previews, per-job downloads (manifest), Compare downloads
   filecache.py       size-capped LRU cache for previews / unpacked archives, and the free-disk-space check
-  api/               auth, users, connections, files, jobs, monitor, pipelines, compare, remote
+  api/               auth, users, connections, files, jobs, monitor, pipelines, compare, remote, alerts, settings,
+                     transfer
+  alerts/            catalog.py (events, options, scope), engine.py (the evaluator: state, transitions, mute,
+                     summaries), messages.py (per channel), senders.py (Telegram / Slack / SMTP / webhook),
+                     delivery.py (the Celery send, retries, the channel's last error)
   connectors/        one class per database: connect, test, inspect (base.py is the interface); S3 / SFTP /
                      HTTP are "storage" connectors with one filesystem interface (storage.py)
   engine/            the load engine
@@ -76,7 +84,8 @@ backend/app/
     types.py, ddl.py   one logical type vocabulary and per-database CREATE TABLE
   compare/           source vs target diffs: spec, DuckDB diff engine, result exports
   monitor/           service checks (HTTP / TCP / query) and host resources (psutil)
-  worker/            Celery app; runs jobs; beat runs health checks, due service checks and due pipelines
+  worker/            Celery app; runs jobs; beat runs health checks, due service checks, due pipelines and the alert
+                     evaluator; alert sends run as their own task
 backend/alembic/     migrations
 backend/tests/       pytest
 
@@ -84,9 +93,12 @@ frontend/src/
   lib/               api.ts (typed client), auth.tsx, theme.tsx, toast.tsx, format.ts, highlight.ts
   ui/                Button, Input, Card, Modal, Badge, ProgressBar, SegmentedControl, Toggle ...
   shell/             AppShell (header + collapsible sidebar), Logo
-  pages/             Login, Users (superadmins), account/Password (change password, the forced "set a new password"),
+  pages/             Login, Users (superadmins, shown in Control & Setup), account/Password (change password, the
+                     forced "set a new password"),
                      Connections (+ AddConnectionModal, also used to edit), Jobs (+ jobs/JobDetail, SSE-driven),
-                     Monitor (+ monitor/ServiceCheckModal), Pipelines (+ pipelines/*), ComingSoon (Control)
+                     Monitor (+ monitor/ServiceCheckModal, monitor/ActiveAlerts), Pipelines (+ pipelines/*)
+    control/         Control & Setup (loaded on first open): ControlSetup (tabs), Alerts (+ ChannelModal, RuleModal,
+                     alertText.ts), Settings, Transfer (export / import)
     upload/          the 4-step wizard: Wizard, Step1Source .. Step4Review, jobBuilder.ts (state -> JobIn)
     pipelines/       Builder (3-column: steps sidebar, step editor, live preview), NewPipelineModal,
                      StepEditor (one editor per step kind), SourceTargetEditor (shared read/load editors),
@@ -115,7 +127,7 @@ frontend/design/      the original Claude Design prototype (reference only, not 
 | POST | /connections/{id}/test | test one, updates its state |
 | GET | /connections/{id}/tables | tables with catalog row estimates |
 | GET | /connections/{id}/tables/{table}/inspect | columns, keys/indexes, ranked split candidates |
-| POST | /files/upload | browser upload into `/data/uploads/...`, returns the path (max 2 GB) |
+| POST | /files/upload | browser upload into `/data/uploads/...`, returns the path (at most the upload limit in Settings; 413 above it) |
 | POST | /files/inspect | inspect a file under an allowed root: columns, row estimate, preview (`header` / `skip_rows` / `delimiter` override CSV detection) |
 | GET | /remote/{connection_id}/list | one folder of an S3 / SFTP connection (`?path=`): folders first, size, modified, format |
 | POST | /remote/match | `{remote, target?}`: the files a run would pick now: total, bytes, newest, new / changed / already loaded |
@@ -146,18 +158,33 @@ frontend/design/      the original Claude Design prototype (reference only, not 
 | GET | /compare/{id}/export | `?sets=a,b&columns=all\|keys\|a,b&format=csv\|xlsx\|parquet\|json&rows=all\|sample`: a file (several sets: a .zip, Excel: one sheet each) |
 | POST | /compare/{id}/cancel | stop it |
 | DELETE | /compare/{id} | remove it and its result files |
+| GET/POST | /alerts/channels | list / add an alert channel (secrets write-only: `secrets_set` lists which are saved) |
+| PATCH/DELETE | /alerts/channels/{id} | edit (a blank secret keeps the saved one; `clear_secrets` removes some) / delete |
+| POST | /alerts/channels/test | send a test with unsaved settings (`id`: an existing channel's saved secrets fill the blanks) |
+| POST | /alerts/channels/{id}/test | send a test now; returns `ok` and the real error |
+| GET/POST | /alerts/rules | list (each with how many are firing) / add |
+| PATCH/DELETE | /alerts/rules/{id} | edit (another event, or switching it off, forgets its state without messages) / delete |
+| POST | /alerts/test | `{channel_ids, rule_name?}`: a test message to several channels (the rule dialog's Send test) |
+| GET/PUT | /alerts/mute | the mute / `{until}` (at most 7 days ahead), or `{until: null}` to unmute now (sends the summary) |
+| GET | /alerts/active | what is firing now (every role; a viewer's answer has no ids) |
+| GET | /settings | every setting that isn't hidden: effective value, source, bounds, default, help |
+| PUT/DELETE | /settings/{key} | `{value}`: save a runtime setting (422: type, bounds, or a restart-required one) / reset it |
+| POST | /export | `{include_secrets?, passphrase?}`: the export file (secrets: superadmins only, passphrase of 12+ characters) |
+| POST | /import/plan | `{document, passphrase?}`: the dry run (create / update / skip / conflict per object) |
+| POST | /import/apply | `{document, passphrase?, picked}`: apply the picked objects; one result per object |
 | GET | /health | liveness + app DB check |
 
-Secrets (passwords, MongoDB URIs) are encrypted with `CONDUIT_SECRET_KEY` and never returned.
+Secrets (passwords, MongoDB URIs, alert channel tokens and URLs) are encrypted with `CONDUIT_SECRET_KEY` and never
+returned.
 Passwords omitted on `PATCH` keep their stored value. Which role may call which route: see Users and roles.
 
 ## Users and roles
 
 | Role | Can |
 |---|---|
-| **superadmin** | everything an admin can, plus the **Users** screen: add users, change roles, reset passwords, deactivate / reactivate, delete |
-| **admin** | everything else, as the single admin always could: connections, uploads and loads, jobs, pipelines and schedules, Compare, Monitor (checks, refresh) |
-| **viewer** | look, not touch: Monitor (each connection's health only: name, type, status, latency, last check, note; service checks without query SQL), Jobs (status, live progress, errors, the log), the pipeline list (labels, step count, last run, schedule), comparisons (status and counts). No data rows (reject files, previews, dry-run samples, comparison rows or exports), no Connections page, no changes of any kind besides their own password |
+| **superadmin** | everything an admin can, plus secrets in an export and **Control & Setup > Users**: add users, change roles, reset passwords, deactivate / reactivate, delete |
+| **admin** | everything else, as the single admin always could: connections, uploads and loads, jobs, pipelines and schedules, Compare, Monitor (checks, refresh), Control & Setup (Alerts, Settings, Export / import) |
+| **viewer** | look, not touch: Monitor (each connection's health only: name, type, status, latency, last check, note; service checks without query SQL), Jobs (status, live progress, errors, the log), the pipeline list (labels, step count, last run, schedule), comparisons (status and counts). No data rows (reject files, previews, dry-run samples, comparison rows or exports), no Connections page or Control & Setup (but the Monitor's Active alerts panel, without ids), no changes of any kind besides their own password |
 
 Admins and superadmins share one workspace: everyone sees and edits every connection, pipeline and job.
 `owner_id` is informational ("Created by" on pipelines, "Started by" on jobs). There are no per-connection
@@ -242,7 +269,7 @@ they are.
   omitted or empty in the `PATCH` body keeps its stored value). The backend endpoint and the API client's
   `connectionsApi.update()` both already existed — this was a pure frontend gap.
 - **Health checks** run in the `beat` service every `CONDUIT_HEALTH_CHECK_INTERVAL_S` seconds and overwrite the
-  connection's state. Slower than 500 ms reports "Degraded".
+  connection's state. Slower than *Slow connection* (Settings, 500 ms by default) reports "Degraded".
 - Run exactly one `beat`; scale `worker` freely.
 - **Transfer planner**: `.../tables/{table}/inspect` ranks split-column candidates (recommended /
   alternative / not_advised) from cheap catalog metadata only — indexes/keys plus physical-order
@@ -318,7 +345,7 @@ and an `expect` value:
 
 | `kind` | `target` | `expect` | Result |
 |---|---|---|---|
-| `http` | URL | status code, default 200 | `up` on the expected status (redirects are not followed, so `302` is compared like any status), `warn` if slower than 2 s, `down` otherwise |
+| `http` | URL | status code, default 200 | `up` on the expected status (redirects are not followed, so `302` is compared like any status), `warn` if slower than *Slow service check* (Settings, 2 s by default), `down` otherwise |
 | `tcp` | `host:port` | slowest acceptable connect time in ms, default 1000 | `up` if it connects in time, `warn` if slower, `down` if refused / timed out |
 | `query` | a saved SQL connection + a `SELECT` / `WITH` query | expected row count, empty = any | runs `COUNT(*)` over your query; only single read statements are accepted; MongoDB is not supported |
 | `docker` | a container name or ID | empty/`running` (just up), or `healthy` (require a passing `HEALTHCHECK`) | `up` if running (`healthy` too, when asked); `warn` if running but unhealthy, or if a `HEALTHCHECK` is still in its `starting` grace period; `down` if stopped, not found, or (for `healthy`) no `HEALTHCHECK` is defined at all |
@@ -330,8 +357,9 @@ up?). Set `verify_tls` to `false` for internal HTTPS with a self-signed certific
 **Host resources** are what the API process sees: inside Docker that is the Docker host (on Windows, the WSL2
 VM), not Windows itself. `Data` (the `/data` mount) is always shown; add more with
 `CONDUIT_MONITOR_DISKS="/mnt/big:Big disk,/srv"` (paths as seen inside the container, so mount them
-read-only in `docker-compose.yml` first). `CONDUIT_MONITOR_WARN_PCT` (default 85) is where `level` turns
-`high`. `CONDUIT_CHECK_TIMEOUT_S` (default 8) is the HTTP/TCP/docker timeout.
+read-only in `docker-compose.yml` first). *High level* (Settings, `CONDUIT_MONITOR_WARN_PCT`, default 85) is where
+`level` turns `high`. *Service check timeout* (Settings, `CONDUIT_CHECK_TIMEOUT_S`, default 8) is the HTTP/TCP/docker
+timeout.
 
 **Docker checks** talk straight to the Docker Engine API over its unix socket (no `docker` CLI involved,
 stdlib-only) — `GET /containers/{name}/json`, read `State.Status` and `State.Health.Status`. They only work
@@ -343,7 +371,8 @@ mounted by default: it's optional, and it grants read access to every container 
 command on the host, so only enable it if you trust everyone who can create a check here.
 `CONDUIT_DOCKER_SOCKET` (default `/var/run/docker.sock`) points at a different socket path.
 
-Not built: alerts/notifications.
+Alerts on connections, service checks and host resources: Control & Setup > Alerts. The Monitor's **Active alerts**
+panel shows what is firing now, to every role.
 
 ## Pipelines
 
@@ -614,6 +643,181 @@ slice of a huge table with the WHERE filters. Each side is read as it is at that
 the compare show up as differences. Rows with a NULL key never match. If a key is not unique, each copy is matched
 with every copy on the other side (a note says so).
 
+## Control & Setup
+
+How Conduit itself behaves (`#/control`): **Alerts**, **Settings** and **Export / import** for admins and
+superadmins, and **Users** for superadmins (`#/users` opens that tab). Viewers get none of it; they see the
+Monitor's **Active alerts** panel. Control & Setup configures Conduit only: it never starts or stops containers
+or other tools.
+
+### Alerts
+
+A **rule** is shared by everyone (there are no per-user subscriptions): a name, an **event**, a **scope**
+(everything; a picked list of pipelines, connections or service checks; or connections by environment tag),
+the event's thresholds, the **channels** it sends to, and on / off. While something is wrong, one row per
+(rule, subject) holds its current state (`alert_states`: firing, since, notified, reason); it is deleted when the
+thing recovers. Nothing else is kept: there is no alert history.
+
+**One message when it breaks, one when it recovers.** Nothing is repeated while it stays broken. A recovery says
+how long it lasted. A problem that clears before its threshold sends nothing.
+
+| Event | Fires when | Clears when | Options |
+|---|---|---|---|
+| Job failed | a run fails: every load or pipeline run, pipeline runs only, or scheduled runs only | the pipeline's next successful run (manual runs count too). A one-off load has no next run: one message, no Active alerts row | which jobs |
+| Job stalled | a running job has been silent for 90 s (the Jobs screen's rule) | it moves again or ends | |
+| Schedule couldn't start | the scheduler could not launch a due pipeline (no admin to run it as, a broken source, no cached preview) | the next scheduled launch works | |
+| Pipeline input stale | an enabled, scheduled pipeline whose remote source takes the newest or all files (skipping loaded ones) has loaded no new file for N hours | a new file loads | hours (default 24) |
+| Connection down | K health checks in a row failed | a check passes | K (default 2); count degraded as failed |
+| Service check down | K runs in a row were `down` | it is up again | K (default 2) |
+| Host resource high | disk, memory or CPU stays above a level for M minutes | it drops below | resources; level (default: Settings > Monitor > High level); minutes (default 5) |
+| Compare found differences | a comparison finishes with missing, extra, different or duplicate rows | (one message, no Active alerts row) | |
+
+**How it runs.** A job's end, the scheduler and a comparison's end report to the evaluator
+(`app/alerts/engine.py`) directly, inside a guard: an alert problem never fails or slows what reported it.
+Celery beat runs `conduit.alerts.evaluate` every 30 s for connections, service checks, the host, stalled jobs and
+stale inputs. Messages go out through the Celery task `conduit.alerts.send` (a background thread with
+`CONDUIT_JOB_RUNNER=thread`): one attempt is limited to *Send timeout* (Settings, 10 s by default), with two
+retries 10 s apart. A send that still fails only sets the channel's last error, which the Alerts tab shows.
+
+**Messages** are short enough for a phone: a title, a line or two, the error cut at about 500 characters, and a
+link to the right page (a job, a pipeline, the Monitor) when *Public URL* is set (Settings, or
+`CONDUIT_PUBLIC_URL`; no URL, no links). URLs inside errors lose their query string. Telegram gets HTML
+formatting, Slack mrkdwn, email plain text plus simple HTML (subject `[instance name] title`). Times are UTC.
+
+**Mute** (1 h, 4 h, until tomorrow 08:00, or until a time up to 7 days ahead): state keeps updating, nothing is
+sent. When the mute ends (on time, or *Unmute now*), each channel gets one summary: what is still firing, and
+what broke before the mute and recovered during it. Something that broke and recovered entirely within the
+mute is not mentioned.
+
+**Channels** (secrets are Fernet-encrypted with `CONDUIT_SECRET_KEY` and never returned; a blank secret on edit
+keeps the saved one). **Test** sends a real message now and shows the real error.
+
+| Kind | Settings | Secret | Set up |
+|---|---|---|---|
+| Telegram | chat ID | bot token | create a bot with @BotFather, add it to the group or channel; the chat ID is a number like `-1001234567890` (or `@channelname` for a public channel) |
+| Slack | | webhook URL | a Slack app with Incoming Webhooks, one webhook per channel (`https://hooks.slack.com/...`) |
+| Email | SMTP host, port, TLS (STARTTLS / SSL / none), user, From, recipients | password | any SMTP server; the port defaults to 587 / 465 / 25 by TLS mode |
+| Webhook | | URL, extra headers, signing secret | any HTTP(S) endpoint that accepts a JSON `POST` |
+
+The **webhook payload** (format version 1):
+
+```json
+{"version": 1, "status": "firing", "event": "connection_down", "title": "Connection down: prod-pg",
+ "text": "2 failed checks in a row · since 26 Oct 09:35 UTC\nRule: DB down",
+ "rule": {"id": "…", "name": "DB down"}, "subject": {"kind": "connection", "id": "…", "name": "prod-pg"},
+ "since": "2026-10-26T09:35:22Z", "reason": "OperationalError: connection refused …",
+ "url": "https://conduit.example.com/#/monitor", "items": null, "instance": "Conduit", "sent_at": "2026-10-26T09:36:02Z"}
+```
+
+`status` is `firing`, `recovered`, `summary` (the end of a mute; `items` lists what is in it) or `test`. With a
+signing secret, `X-Conduit-Signature: sha256=<hex>` is the HMAC-SHA256 of the raw request body:
+
+```python
+import hashlib, hmac
+ok = hmac.compare_digest(request.headers["X-Conduit-Signature"],
+                         "sha256=" + hmac.new(SECRET.encode(), request.body, hashlib.sha256).hexdigest())
+```
+
+### Settings
+
+Every setting in `app/config.py` belongs to one class (`app/runtime.py`; a test fails for a setting without
+one):
+
+- **runtime**: changed on this tab, no restart. The value is saved in the `settings` table and wins over
+  `.env`. Every process (API, workers, beat) reads the saved values at most 15 s late, and the process that
+  saved one at once. *Reset* removes the saved value: back to `.env`, or the default.
+- **restart**: shown read-only with its `.env` variable; set it in `.env`, then restart. These are read once at
+  start (health-check interval, CORS, job runner), depend on mounts (data folder, allowed file roots, extra
+  disks, Docker socket) or are security policy (session length).
+- **hidden**: never shown or exported: `CONDUIT_SECRET_KEY`, `CONDUIT_JWT_SECRET`, `CONDUIT_DATABASE_URL`,
+  `CONDUIT_REDIS_URL`, the first-run admin's name and password, and a test hook.
+
+The tab groups them (Jobs & retention, Uploads & remote files, Combined sources, Monitor, Alerts, System) and
+shows each one's value, where it comes from (*Set here* by whom and when, *.env*, or *Default*), its bounds and
+default. A value is checked for type and bounds (a 422 with a one-line reason, shown under the field).
+
+| Group | Runtime setting (`.env` variable) | Default | Bounds |
+|---|---|---|---|
+| Jobs & retention | Finished jobs kept (`KEEP_FINISHED_JOBS`) | 10 | 1–1000 |
+| | Comparisons kept (`KEEP_COMPARISONS`) | 10 | 1–100 |
+| | Workers per job, at most (`MAX_WORKERS_PER_JOB`) | 32 | 1–128 |
+| | Connection timeout (`CONNECT_TIMEOUT_S`) | 8 s | 1–120 |
+| Uploads & remote files | Upload limit (`UPLOAD_MAX_MB`) | 2048 MB | 1 – the upload ceiling |
+| | Remote file, at most (`REMOTE_MAX_FILE_MB`) | 20480 MB | 1–1,048,576 |
+| | Files per run, at most (`REMOTE_MAX_FILES`) | 500 | 1–100,000 |
+| | Preview reads whole files up to (`REMOTE_INSPECT_FULL_MB`) | 200 MB | 1–10,240 |
+| | Preview cache (`REMOTE_CACHE_MB`) | 2048 MB | 64–1,048,576 |
+| | Remote request timeout (`REMOTE_TIMEOUT_S`) | 60 s | 5–3600 |
+| | Listing, at most (`REMOTE_LIST_MAX`) | 100,000 | 100–10,000,000 |
+| Combined sources | Preview rows per input (`COMBINED_PREVIEW_ROWS`) | 100,000 | 100–10,000,000 |
+| | Stream-mode lookup rows, at most (`COMBINED_LOOKUP_MAX_ROWS`) | 5,000,000 | 1,000–1,000,000,000 |
+| | Stream-mode lookup memory, at most (`COMBINED_LOOKUP_MAX_MB`) | 2048 MB | 64–1,048,576 |
+| | Keep free on the data disk (`COMBINED_MIN_FREE_GB` / `_PCT`) | 5 GB / 5 % | 0–10,000 / 0–90 |
+| Monitor | High level (`MONITOR_WARN_PCT`) | 85 % | 50–99 |
+| | Service check timeout (`CHECK_TIMEOUT_S`) | 8 s | 1–120 |
+| | Slow connection (`CONNECTION_SLOW_MS`) | 500 ms | 50–60,000 |
+| | Slow service check (`CHECK_SLOW_MS`) | 2000 ms | 50–120,000 |
+| Alerts | Public URL (`PUBLIC_URL`) | empty | an http(s) address, or empty |
+| | Instance name (`INSTANCE_NAME`) | Conduit | 1–60 characters |
+| | Send timeout (`ALERT_SEND_TIMEOUT_S`) | 10 s | 2–120 |
+
+All variables take the `CONDUIT_` prefix. **The upload ceiling** (`CONDUIT_UPLOAD_CEILING_MB`, default 2048,
+restart) is the one linked limit: the frontend's nginx sets `client_max_body_size` from it when its container
+starts (`nginx.conf` is a template), and the API never lets the upload limit above it. Raising it means `.env`
+and a restart of `frontend` and `api`. The Upload screen shows the limit in force.
+
+### Export / import
+
+**Export** writes one JSON file: connections, service checks, pipelines (steps, schedule, on / off), alert
+channels and rules, and the runtime settings saved on the Settings tab. References are by name (a pipeline's
+`connection_id` becomes `"connection": "prod-pg"`, a rule's scope and channels list names). Never in the file:
+users, jobs, comparisons, watermarks, loaded-file records, alert state, `.env` values. The file says its format
+version, the instance name and when it was made.
+
+```json
+{"format": "conduit-export", "version": 1, "instance": "Prod EU", "exported_at": "2026-10-26T10:30:00Z",
+ "secrets": "none",
+ "settings": {"keep_finished_jobs": 20},
+ "connections": [{"name": "prod-pg", "type": "postgres", "env": "prod", "config": {"host": "db.internal", "port": 5432,
+                  "database": "sales", "user": "loader"}, "secrets_set": ["password"]}],
+ "service_checks": [], "pipelines": [{"name": "nightly-orders", "schedule": "0 2 * * *", "enabled": true,
+   "source": {"connection": "prod-pg", "table": "public.orders"}, "target": {"connection": "warehouse", "table": "orders"}, "…": "…"}],
+ "alert_channels": [], "alert_rules": []}
+```
+
+**Secrets** stay out unless a **superadmin** asks for them (admins may use saved credentials but never read
+them). Then the file says `"secrets": "encrypted"`, carries an `encryption` block (scrypt, n = 2^15, r = 8, p = 1, a
+random salt, and a check value that tells a wrong passphrase apart at once) and each connection or channel a
+`secrets` token: Fernet under a key derived from a passphrase of at least 12 characters. The instance key never
+leaves. Whoever has both the file and the passphrase has the secrets: send them separately.
+
+**Import** is a dry run first: every object in the file is *create*, *update* (with what it changes), *skip*
+(the same here) or *conflict* (it cannot be applied: a connection or channel of another type with the same
+name, a reference that is neither here nor in the file, two service checks here with the name, a value out of
+bounds on this Conduit). It also lists what will need attention, e.g. "prod-pg needs a password". Then only
+the picked objects are applied, in order (settings, connections, service checks, pipelines, channels, rules),
+each on its own, so one failure doesn't stop the rest. A file with a newer format version is refused.
+
+The safety rules:
+
+- **Pipelines arrive disabled**: the schedule is kept, but there is no cached preview, so neither a run nor the
+  scheduler starts them until someone refreshes the preview and switches them on. An update of an existing
+  pipeline disables it the same way.
+- **A connection without its secrets is marked *needs credentials***: health checks skip it (it never shows as
+  down), and tests, previews, table lists, comparisons and jobs refuse it with that message, until it is edited
+  with its secrets. An update of an existing connection keeps the secrets saved here unless the file brings
+  its own.
+- **A channel without its secrets arrives disabled**, saying which secret it needs.
+- **Not carried**: watermarks (a combined source's first run here reads its driver input whole) and
+  loaded-file records (a remote source that skips loaded files loads every matching file on its first run
+  here). The dry run says so.
+- Imported secrets are re-encrypted with this instance's `CONDUIT_SECRET_KEY`; imported objects are owned by
+  whoever imports them.
+
+**Limits.** Alerts keep no history and have no per-user subscriptions or escalation. A burst of alerts to
+Telegram or Slack can hit their rate limits (each message is retried twice, then the channel shows the error).
+Export / import moves configuration only, never data.
+
 ## Frontend
 
 React + TypeScript + Vite, ported from the `frontend/design/Conduit v2.dc.html` prototype (same oklch
@@ -652,8 +856,8 @@ stop the `frontend` container first, or both will fight over :5173.
   for this kind.
 - "Save as pipeline" (in the upload wizard) still isn't wired up — Pipelines has its own "New pipeline"
   entry point instead, since a pipeline needs a source and target up front (`POST /pipelines` requires
-  both), unlike the wizard which only finalizes them in step 3. The design-system screen is the one
-  remaining `ComingSoon` placeholder besides Control & Setup, matching the sidebar's "SOON" badge.
+  both), unlike the wizard which only finalizes them in step 3. No placeholder screens are left: Control &
+  Setup was the last one.
 - Pipelines has no manual step reordering (drag-and-drop wasn't in the mockup either — new steps always
   append before Load) and no per-step "up next" column-name autocomplete (the input columns before a
   step are only reliably known once a preview has run, so free-text entry is used everywhere instead).
@@ -802,7 +1006,6 @@ celery -A app.worker.celery_app beat --loglevel=info
   `Connections.tsx` pass down the type list it already loads for its own table, instead of the dialog
   re-fetching its own copy on every open. Confirmed the flash is gone by screenshotting the same dialog open
   repeatedly.
-- The design-system screen is the one remaining unbuilt placeholder (see Frontend, above).
 - **Remote intake** was verified live through the running stack's API (the same endpoints the UI calls; jobs on
   the real Celery worker, schedules on the real beat) against MinIO (endpoint + path-style) and `atmoz/sftp`:
   connection tests and health status, a wrong S3 secret explained, browsing (folders first, format through
@@ -868,3 +1071,31 @@ celery -A app.worker.celery_app beat --loglevel=info
   - a job event stream request with `?token=` appeared in nginx's log without the query string and in the
     API's as `token=***`;
   - no container log contained a token.
+- **Control & Setup** was verified live on two throwaway stacks (all six services, migrations `0010` and `0011` on a
+  fresh Postgres, through the real nginx), not on a running install:
+  - channels: a webhook to a listener on the host (each request's `X-Conduit-Signature` checked against the
+    signing secret) and email through Mailpit (subject `[instance] title`, plain text and HTML, two
+    recipients); each channel's Test;
+  - connection down: stopping a test Postgres container sent one "Connection down" (2 failed checks, 68 s after the
+    stop) by webhook and email, nothing more while it stayed down, and "Recovered … lasted 1 min" 60 s after it
+    came back;
+  - a `* * * * *` pipeline made to fail (a Python step) sent "Pipeline failed" with the error excerpt and a link to
+    the job, then "Ran fine again" after the next good run;
+  - lowering *High level* to 50 % in Settings made the evaluator on the worker fire "Disk Data high" within 30 s;
+    Reset brought "Recovered … lasted 3 min";
+  - mute: with the disk alert firing, a connection that broke (sent) and came back during a 1 h mute sent nothing;
+    *Unmute now* sent "Alerts unmuted: 1 still firing, 1 recovered meanwhile". The email channel (no disk rule)
+    said "0 still firing" then; that wording was fixed afterwards ("1 recovered meanwhile", covered by a test,
+    not re-run live);
+  - the upload limit followed the ceiling: with `CONDUIT_UPLOAD_CEILING_MB=1024`, nginx's config said `1024m` and the
+    Upload screen "Up to 1 GB per file";
+  - export with secrets under a passphrase from one stack, import into an empty second one: a wrong passphrase was
+    refused; all 9 objects were created; the Postgres connection tested OK there with the carried password; the
+    pipeline arrived disabled with its schedule, and `/run` asked for a preview; the webhook test from the second
+    stack was signed with the carried secret; a second dry run said "skip" for everything;
+  - every screen on both stacks, dark and light: no console errors.
+
+  **Not verified live**: Telegram and Slack (their requests were tested against local stand-ins only), SMTP with
+  STARTTLS / SSL and a login (tested against a local SMTP server with AUTH; Mailpit took plain SMTP), a burst of
+  alerts against Telegram's or Slack's rate limits, and the "Pipeline input stale" and "Compare found differences"
+  events (tests only).

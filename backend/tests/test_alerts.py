@@ -406,6 +406,23 @@ def test_unmuting_by_hand_sends_the_summary_now(client, auth, alerting):
     assert r.status_code == 422
 
 
+def test_a_summary_with_nothing_still_firing_says_only_what_recovered(client, auth, alerting):
+    from app.alerts.engine import evaluate
+
+    rule(client, auth, alerting["channel"], "connection_down", options={"k": 1})
+    a = _conn()
+    _check_result(a, "err")
+    evaluate()
+    assert len(alerting["sink"].take()) == 1  # the break went out
+    client.put("/api/alerts/mute", json={"until": (now() + dt.timedelta(hours=1)).isoformat()}, headers=auth)
+    _check_result(a, "ok")
+    evaluate()
+    assert alerting["sink"].take() == []
+    client.put("/api/alerts/mute", json={"until": None}, headers=auth)
+    [m] = alerting["sink"].take()
+    assert m["title"] == "Alerts unmuted: 1 recovered meanwhile" and m["items"][0]["since"] is None
+
+
 # ---- the API -----------------------------------------------------------------------------------------------
 
 def test_channel_secrets_are_never_returned_and_blank_keeps_them(client, auth, alerting):

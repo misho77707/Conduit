@@ -83,7 +83,9 @@ export function describeRule(r: Pick<AlertRuleIn, "event" | "scope" | "options" 
     case "check_down": when = `When a service check${of} is down ${times(o.k ?? 2, "run")} in a row`; break;
     case "host_high": {
       const res = ((o.resources as string[]) || []).map((x) => (x === "cpu" ? "CPU" : x));
-      when = `When ${listing(res) || "nothing"} stays above ${o.pct ? `${o.pct}%` : "the Monitor's warning level"} for ${o.minutes ?? 5} min`;
+      const level = o.pct ? `${o.pct}%` : "the Monitor's warning level";
+      const minutes = o.minutes ?? 5;
+      when = `When ${listing(res) || "nothing"} ${minutes ? `stays above ${level} for ${minutes} min` : `goes above ${level}`}`;
       break;
     }
     case "compare_diff": when = "When a comparison finds differences"; break;

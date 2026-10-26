@@ -416,7 +416,7 @@ def summarize(s: Session, out: Outbox) -> None:
             item = {"title": _title(r, st.subject_label, st.subject_kind), "since": fmt_time(st.bad_since), "status": "firing"}
             st.notified = "firing"
         elif st.notified == "firing":
-            item = {"title": _title(r, st.subject_label, st.subject_kind), "since": "", "status": "recovered"}
+            item = {"title": _title(r, st.subject_label, st.subject_kind), "since": None, "status": "recovered"}
             s.delete(st)
         else:
             continue
@@ -426,6 +426,7 @@ def summarize(s: Session, out: Outbox) -> None:
     for cid, items in per.items():
         firing = sum(1 for i in items if i["status"] == "firing")
         recovered = len(items) - firing
-        title = f"Alerts unmuted: {firing} still firing" + (f", {recovered} recovered meanwhile" if recovered else "")
+        parts = [f"{firing} still firing"] * bool(firing) + [f"{recovered} recovered meanwhile"] * bool(recovered)
+        title = "Alerts unmuted: " + ", ".join(parts)  # per channel: only what this channel's rules cover
         out.items.append((cid, Message(status="summary", title=title, items=items, link=absolute("#/monitor"),
                                        link_label="Open Monitor")))
