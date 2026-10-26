@@ -20,7 +20,7 @@ const DATA_NAV: NavItem[] = [
 const OPS_NAV: NavItem[] = [
   { id: "monitor", label: "Monitor", icon: "monitor_heart" },
   { id: "users", label: "Users", icon: "group", need: "manageUsers" },
-  { id: "control", label: "Control & Setup", icon: "tune", soon: true, need: "edit" },
+  { id: "control", label: "Control & Setup", icon: "tune", need: "edit" },
 ];
 const TITLES: Record<string, string> = {
   connections: "Connections", upload: "Upload & Load", jobs: "Jobs", pipelines: "Pipelines", compare: "Compare",

@@ -538,3 +538,57 @@ export const pipelinesApi = {
     post<PipelinePreviewOut>(`/pipelines/${id}/preview`, { sample_rows: sampleRows, upto_step: uptoStep ?? null }),
   run: (id: string) => post<JobSnapshot>(`/pipelines/${id}/run`),
 };
+
+// ---- alerts (Control & Setup): backend/app/api/alerts.py, app/alerts/catalog.py ------------------------------
+
+export type AlertKind = "telegram" | "slack" | "email" | "webhook";
+export type AlertEvent = "job_failed" | "job_stalled" | "schedule_failed" | "input_stale" | "connection_down" | "check_down"
+  | "host_high" | "compare_diff";
+
+/** A channel's non-secret settings. Secrets (bot_token, webhook_url, password, url / headers / signing_secret) are
+ * sent on save only and never come back: a blank one on edit keeps the stored value. */
+export interface AlertChannelIn {
+  name: string; kind: AlertKind; enabled?: boolean;
+  config: Record<string, unknown>; // telegram: chat_id; email: host, port, tls, user, from, to
+  secrets: Record<string, unknown>;
+}
+export interface AlertChannelOut {
+  id: string; name: string; kind: AlertKind; config: Record<string, unknown>;
+  secrets_set: string[]; // which secrets are stored, never their values
+  enabled: boolean; last_sent_at: string | null; last_error: string | null;
+  rules: string[]; // names of the rules that send here
+  created_at: string; updated_at: string;
+}
+export interface AlertScope { all?: boolean; pipelines?: string[]; connections?: string[]; envs?: string[]; checks?: string[]; }
+export interface AlertRuleIn {
+  name: string; event: AlertEvent; scope: AlertScope; options: Record<string, unknown>; channel_ids: string[]; enabled?: boolean;
+}
+export interface AlertRuleOut {
+  id: string; name: string; event: AlertEvent; event_label: string; scope: AlertScope; options: Record<string, unknown>;
+  channel_ids: string[]; enabled: boolean; firing: number; created_at: string; updated_at: string;
+}
+export interface AlertSendResult { channel_id: string | null; name: string; ok: boolean; error: string | null; }
+export interface ActiveAlert {
+  rule_id: string | null; rule_name: string; event: AlertEvent; event_label: string; // ids: null for a viewer
+  subject_kind: string; subject_id: string | null; subject_label: string;
+  since: string | null; fired_at: string | null; reason: string; link: string; // link: an app page, "#/jobs/<id>"
+}
+export interface ActiveAlertsOut { muted_until: string | null; alerts: ActiveAlert[]; }
+
+export const alertsApi = {
+  channels: () => get<AlertChannelOut[]>("/alerts/channels"),
+  createChannel: (body: AlertChannelIn) => post<AlertChannelOut>("/alerts/channels", body),
+  updateChannel: (id: string, body: Partial<AlertChannelIn> & { clear_secrets?: string[] }) =>
+    patch<AlertChannelOut>(`/alerts/channels/${id}`, body),
+  removeChannel: (id: string) => del<void>(`/alerts/channels/${id}`),
+  testChannel: (id: string) => post<AlertSendResult>(`/alerts/channels/${id}/test`),
+  testUnsaved: (body: AlertChannelIn & { id?: string | null }) => post<AlertSendResult>("/alerts/channels/test", body),
+  rules: () => get<AlertRuleOut[]>("/alerts/rules"),
+  createRule: (body: AlertRuleIn) => post<AlertRuleOut>("/alerts/rules", body),
+  updateRule: (id: string, body: Partial<AlertRuleIn>) => patch<AlertRuleOut>(`/alerts/rules/${id}`, body),
+  removeRule: (id: string) => del<void>(`/alerts/rules/${id}`),
+  sendTest: (channel_ids: string[], rule_name?: string) => post<AlertSendResult[]>("/alerts/test", { channel_ids, rule_name: rule_name || null }),
+  mute: () => get<{ until: string | null }>("/alerts/mute"),
+  setMute: (until: string | null) => req<{ until: string | null }>("/alerts/mute", { method: "PUT", body: JSON.stringify({ until }) }),
+  active: () => get<ActiveAlertsOut>("/alerts/active"), // every role (viewers: no ids)
+};

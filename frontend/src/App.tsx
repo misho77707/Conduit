@@ -10,10 +10,10 @@ import { Jobs } from "./pages/Jobs";
 import { Monitor } from "./pages/Monitor";
 import { Pipelines } from "./pages/Pipelines";
 import { Builder } from "./pages/pipelines/Builder";
-import { ComingSoon } from "./pages/ComingSoon";
 import { Compare } from "./pages/Compare";
 import { Users } from "./pages/Users";
 import { SetPasswordScreen } from "./pages/account/Password";
+import { ControlSetup } from "./pages/control/ControlSetup";
 
 function Private({ children }: { children: JSX.Element }) {
   const { user, loading } = useAuth();
@@ -65,7 +65,8 @@ export default function App() {
                         <Route path="/compare" element={<Compare />} />
                         <Route path="/compare/:id" element={<Compare />} />
                         <Route path="/users" element={<Only can="manageUsers"><Users /></Only>} />
-                        <Route path="/control" element={<Only can="edit"><ComingSoon title="Control & Setup" icon="tune" note="Environment setup, tool management and secrets. Coming later." /></Only>} />
+                        <Route path="/control" element={<Only can="edit"><ControlSetup /></Only>} />
+                        <Route path="/control/:tab" element={<Only can="edit"><ControlSetup /></Only>} />
                         <Route path="*" element={<Home />} />
                       </Routes>
                     </AppShell>

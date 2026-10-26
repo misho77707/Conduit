@@ -11,6 +11,7 @@ import { RowMenu } from "../ui/RowMenu";
 import { StatusBadge } from "../ui/Badge";
 import { ProgressBar } from "../ui/ProgressBar";
 import { ServiceCheckModal } from "./monitor/ServiceCheckModal";
+import { ActiveAlerts } from "./monitor/ActiveAlerts";
 
 const LEVEL_ICON = { ok: ["check_circle", "var(--ok)"], high: ["warning", "var(--warn)"] } as const;
 
@@ -24,7 +25,8 @@ export function Monitor() {
   const [addOpen, setAddOpen] = useState(false);
   const busy = useRef<Set<string>>(new Set());
 
-  const load = () => monitorApi.get().then(setSnap).catch(() => {});
+  const [tick, setTick] = useState(0); // the Active alerts panel refreshes with each poll
+  const load = () => monitorApi.get().then((s) => { setSnap(s); setTick((t) => t + 1); }).catch(() => {});
 
   useEffect(() => {
     load();
@@ -78,6 +80,8 @@ export function Monitor() {
         {can.edit && <Button icon="refresh" disabled={refreshing} onClick={refresh}>{refreshing ? "Refreshing…" : "Refresh"}</Button>}
         {can.edit && <Button variant="primary" icon="add" onClick={() => setAddOpen(true)}>Add service check</Button>}
       </div>
+
+      <ActiveAlerts tick={tick} />
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(480px,1fr))", gap: 16, alignItems: "start" }}>
         <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8 }}>
