@@ -14,3 +14,7 @@ CLAUDE.md
 # database backups (they hold password hashes and encrypted connection secrets)
 *.dump
 *.sql
+
+# benchmark data and results (backend/bench/bench.py)
+backend/bench/data/
+backend/bench/results/
