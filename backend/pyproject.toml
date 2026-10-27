@@ -30,6 +30,7 @@ dependencies = [
   "httpx>=0.27",  # HTTP(S) storage connections and ad-hoc URLs
   "adbc-driver-postgresql>=1.13",  # the Postgres "adbc" driver option (Arrow over binary COPY)
   "adbc-driver-manager>=1.13",
+  "connectorx>=0.4.6",  # the MySQL "fast" driver option's reads (Arrow from Rust)
 ]
 
 [project.optional-dependencies]

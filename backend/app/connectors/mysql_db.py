@@ -1,6 +1,6 @@
 import pymysql
 
-from .base import ColumnInfo, Connector, SplitCandidate, TableInfo, TableSchema
+from .base import ColumnInfo, Connector, DriverOption, SplitCandidate, TableInfo, TableSchema
 
 _NUMERIC_TYPES = ("tinyint", "smallint", "mediumint", "int", "bigint", "decimal", "numeric", "float", "double")
 _TIME_TYPES = ("timestamp", "datetime", "date")
@@ -16,6 +16,23 @@ class MySQLConnector(Connector):
     kind = "host"
     default_port = 3306
     description = "Relational · 5.7+, MariaDB 10.6+"
+    drivers = (
+        DriverOption("fast", "Fast: connectorx reads + LOAD DATA writes",
+                     "Reads are Arrow from connectorx (Rust); writes stream Arrow-built CSV through LOAD DATA LOCAL INFILE, "
+                     "which needs local_infile=ON on the server.", module="connectorx"),
+        DriverOption("pymysql", "PyMySQL (classic)", "Rows through Python: every type, slower.", classic=True),
+    )
+
+    def cx_uri(self) -> str | None:
+        """The connection as a connectorx URI, or None when it uses TLS (connectorx can't take these settings)."""
+        from urllib.parse import quote
+
+        c = self.config
+        if str(c.get("ssl", "disable")) != "disable":
+            return None
+        user = quote(str(c.get("user") or ""), safe="")
+        pw = quote(str(self.secrets.get("password") or ""), safe="")
+        return f"mysql://{user}:{pw}@{c.get('host')}:{int(c.get('port') or self.default_port)}/{quote(str(c.get('database') or ''), safe='')}"
 
     def _connect(self, **overrides) -> pymysql.connections.Connection:
         c = self.config

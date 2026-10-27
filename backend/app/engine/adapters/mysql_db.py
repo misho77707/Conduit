@@ -1,4 +1,13 @@
-"""MySQL / MariaDB adapter: unbuffered (streaming) reads, multi-row INSERT / ON DUPLICATE KEY UPDATE writes."""
+"""MySQL / MariaDB adapter, with two drivers for moving rows:
+
+pymysql (classic): unbuffered (streaming) reads, multi-row INSERT / ON DUPLICATE KEY UPDATE writes.
+fast: connectorx reads (Arrow from Rust) of table sources: JSON is read as CAST(... AS CHAR) and TIMESTAMP as
+UNIX_TIMESTAMP(...) so neither depends on the session (connectorx can't SET time_zone); TIME, BIT, spatial types and
+DECIMAL with more than 10 decimals keep the source on pymysql. Writes are LOAD DATA LOCAL INFILE of CSV that Arrow
+builds (no Python per row), one temp file per batch; LOAD DATA LOCAL turns errors into warnings, so any warning rolls
+the batch back and it is bisected to its bad rows like an INSERT error. Upserts load a temp table, then INSERT ...
+SELECT ... ON DUPLICATE KEY UPDATE.
+"""
 from __future__ import annotations
 
 import datetime as dt
@@ -11,10 +20,11 @@ import pymysql
 import pymysql.cursors
 from pymysql.constants import FIELD_TYPE as FT
 
-from ..arrowconv import dedupe_last, last_value, rows_to_table_lenient, table_rows
+from ..arrowconv import dedupe_last, from_driver, last_value, rows_to_table_lenient, table_rows
 from ..ddl import TargetOptions, create_table_sql, qi, qualified, split_name
+from ..drivers import CapabilityError
 from ..model import Batch, ReadRequest, SplitSpec
-from ..types import ColSpec, normalize
+from ..types import ColSpec, normalize, to_arrow
 from .base import (
     Adapter, SqlDialect, Writer, build_count_sql, build_minmax_sql, build_probe_sql, build_read_sql,
 )
@@ -47,6 +57,55 @@ def _default_expr(d: str | None, extra: str | None) -> str | None:
     if "default_generated" in extra or _SQL_DEFAULT.match(d):
         return d
     return "'" + d.replace("\\", "\\\\").replace("'", "''") + "'"
+
+
+# connectorx reads: pymysql FIELD_TYPE -> how. TIME (a duration to pymysql, a time of day to connectorx), BIT,
+# GEOMETRY and anything unlisted keep the source on pymysql.
+_CX_DIRECT = {FT.TINY, FT.SHORT, FT.LONG, FT.INT24, FT.LONGLONG, FT.FLOAT, FT.DOUBLE, FT.NEWDECIMAL, FT.DATE, FT.DATETIME,
+              FT.YEAR, FT.VARCHAR, FT.VAR_STRING, FT.STRING, FT.ENUM, FT.SET, FT.TINY_BLOB, FT.MEDIUM_BLOB, FT.LONG_BLOB,
+              FT.BLOB}
+
+
+class LoadDataRowError(ValueError):
+    """LOAD DATA LOCAL warned about the batch (it never errors): bisected to its bad rows like an INSERT error."""
+
+
+def _sql_literals(sql: str, params: list[Any]) -> str:
+    from pymysql.converters import escape_item
+
+    return sql % tuple(escape_item(to_bind(p), "utf8mb4") for p in params)
+
+
+def load_data_text(table: pa.Table) -> bytes:
+    """CSV for LOAD DATA (FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' ESCAPED BY ''), built by Arrow:
+    text quoted with "" inside, NULL unquoted, booleans 1 / 0, time-zone-aware timestamps as UTC wall time,
+    binary as hex (loaded through UNHEX)."""
+    import pyarrow.compute as pc
+
+    cols = []
+    for col in table.columns:
+        col = col.combine_chunks()
+        t = col.type
+        if pa.types.is_timestamp(t) and t.tz:
+            col = col.cast(pa.timestamp(t.unit))
+        if pa.types.is_boolean(t):
+            s = pc.if_else(col, "1", "0")
+        elif pa.types.is_binary(t) or pa.types.is_large_binary(t):
+            s = pa.array([None if v is None else v.hex() for v in col.to_pylist()], pa.string())
+        else:
+            s = col.cast(pa.string())
+        if pa.types.is_string(t) or pa.types.is_large_string(t):
+            s = pc.binary_join_element_wise('"', pc.replace_substring(s, '"', '""'), '"', "")
+        cols.append(pc.fill_null(s, "NULL"))
+    lines = pc.binary_join_element_wise(*cols, ",") if len(cols) > 1 else cols[0]
+    lines = pc.binary_join_element_wise(lines, "", "\n")
+    if isinstance(lines, pa.ChunkedArray):
+        lines = lines.combine_chunks()
+    offsets = lines.buffers()[1]
+    import numpy as np
+
+    o = np.frombuffer(offsets, dtype=np.int32)
+    return lines.buffers()[2].to_pybytes()[o[lines.offset]:o[lines.offset + len(lines)]]
 
 
 def _logical_from_field(col: tuple, binary: bool) -> str:
@@ -94,6 +153,93 @@ class MySQLAdapter(Adapter):
 
     def _schema(self, table: str) -> tuple[str | None, str]:
         return split_name(table)
+
+    # ---- drivers -----------------------------------------------------------------
+    def driver_problem(self, driver: str, side: str, ctx: Any) -> str | None:
+        if driver != "fast":
+            return None
+        if side == "target":
+            on = self._rows("SHOW GLOBAL VARIABLES LIKE 'local_infile'")
+            if not on or str(on[0][1]).upper() not in ("ON", "1"):
+                return f"LOAD DATA needs local_infile=ON on the server (it is {on[0][1] if on else 'unknown'})"
+            return None
+        if self.c.cx_uri() is None:
+            return "connectorx can't use this connection's TLS setting"
+        if ctx.query:
+            return "custom SQL may depend on the session time zone, which connectorx can't set"
+        for name, (kind, shown) in self._cx_plan(ctx).items():
+            if kind is None:
+                return f"column `{name}` is `{shown}`, which the connectorx read path here doesn't convert"
+        return None
+
+    def _cx_plan(self, req: ReadRequest) -> dict[str, tuple[str | None, str]]:
+        """name -> (direct | json | epoch, or None if connectorx can't read it as pymysql does; the column type)."""
+        key = (req.table, tuple(c.name for c in req.columns))
+        cached = getattr(self, "_plans", {}).get(key)
+        if cached is not None:
+            return cached
+        schema, name = self._schema(req.table or "")
+        shown = dict(self._rows("select column_name, column_type from information_schema.columns "
+                                "where table_schema = COALESCE(%s, DATABASE()) and table_name = %s", [schema, name]))
+        conn = self.c._connect(init_command=_INIT)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT {', '.join(qi('mysql', c.name) for c in req.columns)} FROM {qualified('mysql', req.table or '')} LIMIT 0")
+                desc = list(cur.description or [])
+        finally:
+            conn.close()
+        plan = {}
+        for c, d in zip(req.columns, desc):
+            code = d[1]
+            m = re.match(r"decimal\((\d+),(\d+)\)", str(shown.get(c.name, "")).lower())
+            if code == FT.JSON:
+                kind = "json"
+            elif code == FT.TIMESTAMP:
+                kind = "epoch"
+            elif code == FT.NEWDECIMAL and (not m or int(m.group(2)) > 10):  # connectorx reads 10 decimals at most
+                kind = None
+            else:
+                kind = "direct" if code in _CX_DIRECT else None
+            plan[c.name] = (kind, shown.get(c.name, str(code)))
+        if not hasattr(self, "_plans"):
+            self._plans = {}
+        self._plans[key] = plan
+        return plan
+
+    def _read_driver(self, req: ReadRequest) -> str:
+        if self.driver_for("source") is None and self.driver is not None:
+            self.settle("source", req)  # previews / Compare: the connection's own choice
+        return self.driver_for("source") or "pymysql"
+
+    def _read_cx(self, req: ReadRequest, split: SplitSpec, batch_rows: int) -> Iterator[Batch]:
+        import connectorx as cx
+
+        plan = self._cx_plan(req)
+        exprs = {n: (f"CAST({qi('mysql', n)} AS CHAR)" if k == "json" else f"UNIX_TIMESTAMP({qi('mysql', n)})")
+                 for n, (k, _) in plan.items() if k in ("json", "epoch")}
+        epoch = [i for i, c in enumerate(req.columns) if plan[c.name][0] == "epoch"]
+        sql, params = build_read_sql(self.sql, req, split, exprs=exprs)
+        try:
+            reader = cx.read_sql(self.c.cx_uri(), _sql_literals(sql, params), return_type="arrow_stream", batch_size=batch_rows)
+            for rb in reader:
+                if rb.num_rows == 0:
+                    continue
+                t = pa.Table.from_batches([rb])
+                for i in epoch:  # UNIX_TIMESTAMP seconds (decimal / integer) -> the UTC wall time pymysql reads
+                    import pyarrow.compute as pc
+
+                    secs = t.column(i).combine_chunks()
+                    micros = pc.multiply(secs.cast(pa.decimal128(18, 6)), pa.scalar(1_000_000, pa.decimal128(7, 0)))
+                    t = t.set_column(i, t.field(i).name, micros.cast(pa.int64()).cast(pa.timestamp("us")))
+                table, rejects = from_driver(t, req.columns)
+                resume = last_value(table, split.column) if split.kind == "range" and split.column and table.num_rows else None
+                yield Batch(table, resume, rejects)
+        except BaseException as e:  # connectorx panics (zero dates ...) arrive as a BaseException
+            if isinstance(e, (GeneratorExit, KeyboardInterrupt, SystemExit)):
+                raise
+            if type(e).__name__ == "PanicException" or "not implemented" in str(e).lower():
+                raise CapabilityError("source", f"connectorx: {' '.join(str(e).split())[:300]}") from e
+            raise
 
     # ---- schema ------------------------------------------------------------------
     def table_columns(self, table: str) -> list[ColSpec]:
@@ -154,6 +300,9 @@ class MySQLAdapter(Adapter):
         return None if mn is None or not cnt else (mn, mx)
 
     def read_batches(self, req: ReadRequest, split: SplitSpec, batch_rows: int) -> Iterator[Batch]:
+        if self._read_driver(req) == "fast":
+            yield from self._read_cx(req, split, batch_rows)
+            return
         sql, params = build_read_sql(self.sql, req, split)
         conn = self.c._connect(cursorclass=pymysql.cursors.SSCursor, autocommit=False, read_timeout=3600, init_command=_INIT)
         try:
@@ -209,8 +358,11 @@ class MySQLAdapter(Adapter):
             raise ValueError(f"Upsert needs a PRIMARY KEY or UNIQUE index on ({', '.join(keys)}) in {table}")
 
     def open_writer(self, table: str, cols: list[ColSpec], mode: str, keys: list[str]) -> Writer:
+        keys = keys if mode == "upsert" else []
+        if self.driver_for("target") == "fast":
+            return LoadDataWriter(self.c._connect(autocommit=False, init_command=_INIT, local_infile=True), table, cols, keys)
         conn = self.c._connect(autocommit=False, init_command=_INIT)
-        return MySQLWriter(conn, table, cols, keys if mode == "upsert" else [])
+        return MySQLWriter(conn, table, cols, keys)
 
 
 class MySQLWriter(Writer):
@@ -238,6 +390,78 @@ class MySQLWriter(Writer):
         except Exception:
             self.conn.rollback()
             raise
+
+    def close(self) -> None:
+        try:
+            self.conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+class LoadDataWriter(Writer):
+    """LOAD DATA LOCAL INFILE of one Arrow-built CSV file per batch; one transaction per write()."""
+
+    def __init__(self, conn, table: str, cols: list[ColSpec], keys: list[str]):
+        import uuid
+
+        self.conn, self.keys = conn, keys
+        names = [c.name for c in cols]
+        fq = qualified("mysql", table)
+        binary = {c.name for c in cols if pa.types.is_binary(to_arrow(c.logical))}
+        targets, sets = [], []
+        for i, n in enumerate(names):
+            if n in binary:
+                targets.append(f"@b{i}")
+                sets.append(f"{qi('mysql', n)} = UNHEX(@b{i})")
+            else:
+                targets.append(qi("mysql", n))
+        into = fq
+        self.after: list[str] = []
+        if keys:
+            self.stg = "conduit_stg_" + uuid.uuid4().hex[:8]
+            with conn.cursor() as cur:
+                cur.execute(f"CREATE TEMPORARY TABLE {self.stg} LIKE {fq}")
+            conn.commit()
+            into = self.stg
+            col_sql = ", ".join(qi("mysql", n) for n in names)
+            nonkey = [n for n in names if n not in keys]
+            self.after = [f"INSERT INTO {fq} ({col_sql}) SELECT {col_sql} FROM {self.stg} ON DUPLICATE KEY UPDATE "
+                          + ", ".join(f"{qi('mysql', n)} = VALUES({qi('mysql', n)})" for n in (nonkey or keys[:1])),
+                          f"DELETE FROM {self.stg}"]
+        self.sql = (f"LOAD DATA LOCAL INFILE %s INTO TABLE {into} CHARACTER SET utf8mb4 FIELDS TERMINATED BY ',' "
+                    "OPTIONALLY ENCLOSED BY '\"' ESCAPED BY '' LINES TERMINATED BY '\\n' "
+                    f"({', '.join(targets)})" + (" SET " + ", ".join(sets) if sets else ""))
+
+    def write(self, table: pa.Table) -> None:
+        import os
+        import tempfile
+
+        if table.num_rows == 0:
+            return
+        table = dedupe_last(table, self.keys)
+        fd, path = tempfile.mkstemp(prefix="conduit-load-", suffix=".csv")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(load_data_text(table))
+            with self.conn.cursor() as cur:
+                cur.execute(self.sql, [path])
+                cur.execute("SHOW WARNINGS")
+                bad = [w for w in cur.fetchall() if str(w[0]).lower() != "note"]
+                if bad:  # LOCAL makes errors warnings (IGNORE): refuse the batch, as an INSERT would have
+                    raise LoadDataRowError(f"({bad[0][1]}) {bad[0][2]}")
+                for s in self.after:
+                    cur.execute(s)
+            self.conn.commit()
+        except Exception as e:
+            self.conn.rollback()
+            if "local infile" in str(e).lower() or "loading local data is disabled" in str(e).lower():
+                raise CapabilityError("target", f"LOAD DATA: {e}") from e
+            raise
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
     def close(self) -> None:
         try:
