@@ -42,6 +42,15 @@ def _database_or_422(conn: Connection) -> None:
         raise HTTPException(422, f"{conn.name} is a file storage connection ({conn.type}): it has files, not tables")
 
 
+def _driver_or_422(type_: str, value: str | None) -> str | None:
+    from ..engine.drivers import check_setting
+
+    problem = check_setting(REGISTRY[type_], value)
+    if problem:
+        raise HTTPException(422, problem)
+    return value
+
+
 def _validate(type_: str, config: dict, secrets: dict) -> None:
     cls = REGISTRY.get(type_)
     if cls is None:
@@ -61,7 +70,11 @@ def create_connection(
     body: ConnectionIn, session: Session = Depends(get_session), user: User = Depends(admin_only)
 ) -> ConnectionOut:
     _validate(body.type, body.config, body.secrets)
-    conn = Connection(name=body.name.strip(), type=body.type, env=body.env, config=body.config, owner_id=user.id)
+    from ..engine.drivers import default_setting
+
+    driver = _driver_or_422(body.type, body.driver) or default_setting(REGISTRY[body.type])
+    conn = Connection(name=body.name.strip(), type=body.type, env=body.env, config=body.config, owner_id=user.id,
+                      driver=driver)
     conn.display_host = get_connector(body.type, body.config, body.secrets).display_host()
     try:
         set_secrets(conn, body.secrets)
@@ -110,6 +123,8 @@ def update_connection(conn_id: uuid.UUID, body: ConnectionPatch, session: Sessio
         conn.name = body.name.strip()
     if body.env is not None:
         conn.env = body.env or None
+    if body.driver is not None:
+        conn.driver = _driver_or_422(conn.type, body.driver)
     conn.config = config
     conn.display_host = get_connector(conn.type, config, secrets).display_host()
     set_secrets(conn, secrets)

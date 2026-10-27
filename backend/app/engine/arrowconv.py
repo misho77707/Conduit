@@ -142,6 +142,71 @@ def conform(table: pa.Table, cols: list[ColSpec]) -> pa.Table:
     return pa.Table.from_arrays(arrays, names=[c.name for c in cols])
 
 
+# ---- fast drivers: one place that makes their Arrow look exactly like the classic path's ----------------------
+
+# A jsonb value whose canonical text may differ from what the classic path makes of it (json.loads, then coerce):
+# a top-level string / true / false / null, or a number with a fraction or an exponent (floats print differently).
+_JSON_MAY_DIFFER = r'^\s*"|^\s*(?:true|false|null)\s*$|[0-9]\.[0-9]|[0-9][eE][-+]?[0-9]'
+
+
+def classic_json(text: str | None) -> Any:
+    """JSON text -> what the classic path makes of the parsed value (psycopg parses json / jsonb with json.loads)."""
+    return None if text is None else coerce(json.loads(text), pa.string())
+
+
+def json_like_classic(arr: pa.Array, canonical: bool) -> pa.Array:
+    """`canonical`: the text is Postgres jsonb output (sorted keys, ", " / ": "), so only values that may print
+    differently go through Python; otherwise (json: the text as it was stored) every value does."""
+    import pyarrow.compute as pc
+
+    arr = arr.combine_chunks() if isinstance(arr, pa.ChunkedArray) else arr
+    if not canonical:
+        return pa.array([classic_json(v) for v in arr.to_pylist()], pa.string())
+    mask = pc.fill_null(pc.match_substring_regex(arr, _JSON_MAY_DIFFER), False)
+    if not pc.any(mask).as_py():
+        return arr
+    idx = pc.indices_nonzero(mask)
+    fixed = pa.array([classic_json(v) for v in arr.take(idx).to_pylist()], pa.string())
+    return pc.replace_with_mask(arr, mask, fixed)
+
+
+def plain(arr: pa.ChunkedArray | pa.Array) -> pa.Array:
+    """Driver-specific Arrow types -> the plain ones: extension types to their storage (Postgres numeric arrives
+    as text in an opaque extension), large_string / large_binary to string / binary, one chunk."""
+    arr = arr.combine_chunks() if isinstance(arr, pa.ChunkedArray) else arr
+    if isinstance(arr.type, pa.BaseExtensionType):
+        arr = arr.storage
+    if pa.types.is_large_string(arr.type):
+        arr = arr.cast(pa.string())
+    elif pa.types.is_large_binary(arr.type):
+        arr = arr.cast(pa.binary())
+    return arr
+
+
+def from_driver(table: pa.Table, cols: list[ColSpec], json_cols: dict[str, bool] | None = None
+                ) -> tuple[pa.Table, list[tuple[str, dict[str, Any]]]]:
+    """A fast driver's batch -> exactly what the classic path would make of the same rows.
+
+    Columns are matched by position. `json_cols`: name -> canonical (jsonb) for JSON columns. Casts are safe
+    (nothing truncated); when one fails, the batch goes the classic row-by-row way, so bad values become the
+    same rejects with the same reasons."""
+    arrays = []
+    for i, c in enumerate(cols):
+        arr = plain(table.column(i))
+        if json_cols and c.name in json_cols:
+            arr = json_like_classic(arr, json_cols[c.name])
+        arrays.append(arr)
+    try:
+        out = []
+        for c, arr in zip(cols, arrays):
+            t = to_arrow(c.logical)
+            out.append(arr if arr.type == t else arr.cast(t, safe=True))
+        return pa.Table.from_arrays(out, names=[c.name for c in cols]), []
+    except (pa.ArrowInvalid, pa.ArrowNotImplementedError, pa.ArrowTypeError, decimal.InvalidOperation):
+        rows = list(zip(*[a.to_pylist() for a in arrays])) if arrays else []
+        return rows_to_table_lenient(rows, cols)
+
+
 def last_value(table: pa.Table, col: str) -> Any:
     if table.num_rows == 0:
         return None

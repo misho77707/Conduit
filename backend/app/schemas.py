@@ -65,6 +65,7 @@ class ConnectionIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     type: str
     env: str | None = Field(default=None, max_length=30)
+    driver: str | None = None  # "auto" (the default where there is a choice) or a driver option id
     config: dict[str, Any] = Field(default_factory=dict)
     secrets: dict[str, Any] = Field(default_factory=dict)
 
@@ -72,6 +73,7 @@ class ConnectionIn(BaseModel):
 class ConnectionPatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     env: str | None = None
+    driver: str | None = None  # omitted: unchanged
     config: dict[str, Any] | None = None  # merged over the stored config
     secrets: dict[str, Any] | None = None  # merged; omitted keys keep their stored value
 
@@ -100,6 +102,7 @@ class ConnectionOut(BaseModel):
     last_checked_at: datetime | None
     created_at: datetime
     needs_credentials: bool = False  # imported without its secrets: unusable until edited with them
+    driver: str | None = None  # "auto", a driver option id, or None (the type has one driver)
 
 
 class TestResultOut(BaseModel):
@@ -111,6 +114,7 @@ class TestResultOut(BaseModel):
     error: str | None = None
     degraded: bool = False
     learned: dict[str, Any] = Field(default_factory=dict)  # config a test discovered (SFTP host key): save it with the connection
+    note: str | None = None  # e.g. the connection's fast driver could not be opened
 
 
 class ConnectionTestOut(TestResultOut):

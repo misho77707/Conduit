@@ -125,10 +125,13 @@ export const usersApi = {
 // ---- meta / connections -------------------------------------------------------------
 
 export type ConnectionCategory = "database" | "storage";
+/** One way to move a database's data (backend engine/drivers.py); the classic one is the fallback. */
+export interface DriverOption { id: string; label: string; note: string; read: boolean; write: boolean; classic: boolean; }
 export interface DbTypeOut {
   type: string; label: string; abbr: string; kind: "host" | "uri" | "file" | "s3" | "sftp" | "http";
   default_port: number | null; description: string; secret_fields: string[];
   category: ConnectionCategory; // storage = S3 / SFTP / HTTP: files, never tables
+  drivers: DriverOption[]; // fastest first; empty: one driver only, nothing to choose
 }
 
 export interface ConnectionOut {
@@ -136,11 +139,13 @@ export interface ConnectionOut {
   config: Record<string, unknown>; status: "ok" | "warn" | "err" | "idle"; latency_ms: number | null;
   server_version: string | null; note: string | null; last_checked_at: string | null; created_at: string;
   needs_credentials: boolean; // imported without its secrets: unusable until edited with them
+  driver: string | null; // "auto", a driver option id, or null (the type has one driver)
 }
 
 export interface TestResultOut {
   ok: boolean; status: "ok" | "warn" | "err"; latency_ms: number | null; version: string | null;
   detail: string | null; error: string | null; degraded: boolean;
+  note?: string | null; // e.g. the connection's fast driver could not be opened
   learned?: Record<string, unknown>; // config a test discovered (an SFTP host key): saved with the connection
 }
 export interface ConnectionTestOut extends TestResultOut { connection: ConnectionOut | null; }
@@ -167,9 +172,9 @@ export const metaApi = {
 export const connectionsApi = {
   list: () => get<ConnectionOut[]>("/connections"),
   get: (id: string) => get<ConnectionOut>(`/connections/${id}`),
-  create: (body: { name: string; type: string; env?: string | null; config: Record<string, unknown>; secrets: Record<string, unknown> }) =>
+  create: (body: { name: string; type: string; env?: string | null; driver?: string | null; config: Record<string, unknown>; secrets: Record<string, unknown> }) =>
     post<ConnectionOut>("/connections", body),
-  update: (id: string, body: { name?: string; env?: string | null; config?: Record<string, unknown>; secrets?: Record<string, unknown> }) =>
+  update: (id: string, body: { name?: string; env?: string | null; driver?: string | null; config?: Record<string, unknown>; secrets?: Record<string, unknown> }) =>
     patch<ConnectionOut>(`/connections/${id}`, body),
   remove: (id: string) => del<void>(`/connections/${id}`),
   testUnsaved: (body: { type: string; config: Record<string, unknown>; secrets: Record<string, unknown> }) =>
@@ -307,6 +312,7 @@ export interface OptionsIn {
   strategy: "full" | "id" | "time" | "watermark"; split_column?: string | null; lo?: string | number | null;
   hi?: string | number | null; timezone: string; workers: number; splits?: number | null; split_rows?: number | null;
   read_chunk: number; write_batch: number; max_rejects: number; retries: number;
+  source_driver?: string | null; target_driver?: string | null; // null: each connection's own driver setting
 }
 export interface JobIn {
   name?: string | null; source: SourceIn; target: TargetIn; columns?: ColumnMapIn[] | null; options: OptionsIn;
@@ -324,7 +330,10 @@ export interface JobPlan {
   split_column: string | null; split_unique: boolean; workers: number;
   splits: { idx: number; label: string; est_rows: number | null; kind: string }[];
   notes: string[]; warnings: string[]; sample: JobPlanSample | null;
+  drivers?: { source?: DriverChoice; target?: DriverChoice }; // only for databases with a driver choice
 }
+/** The driver a job side uses (backend engine/drivers.Choice.public). */
+export interface DriverChoice { requested: string; used: string; label: string; explicit: boolean; why: string | null; }
 
 export interface JobSnapshot {
   id: string; name: string; kind: "transfer" | "file_load" | "pipeline"; status: string;

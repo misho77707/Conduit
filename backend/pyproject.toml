@@ -28,6 +28,8 @@ dependencies = [
   "boto3>=1.34",  # S3 storage connections
   "paramiko>=3.4",  # SFTP storage connections
   "httpx>=0.27",  # HTTP(S) storage connections and ad-hoc URLs
+  "adbc-driver-postgresql>=1.13",  # the Postgres "adbc" driver option (Arrow over binary COPY)
+  "adbc-driver-manager>=1.13",
 ]
 
 [project.optional-dependencies]

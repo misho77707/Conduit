@@ -36,6 +36,7 @@ from ..connectors import category_of
 from ..connectors.base import UserFacingError
 from ..services import build_connector
 from . import joblog
+from .drivers import CapabilityError, Choice, DriverRefused, TargetCtx, choose
 from .adapters import PartialWrite, get_adapter
 from .arrowconv import _jsonable
 from .ddl import TargetOptions, split_statements, suggest_partition
@@ -234,6 +235,7 @@ class Prepared:
     notes: list[str] = field(default_factory=list)
     steps: list[Step] = field(default_factory=list)
     remote: Any = None  # remote.RemoteCtx of a load job reading downloaded remote files
+    drivers: dict[str, Choice] = field(default_factory=dict)  # side -> the driver option chosen (engine/drivers.py)
 
     @property
     def opts(self):
@@ -266,6 +268,7 @@ def prepare(spec: JobIn, session: Session, job_id: uuid.UUID | None = None) -> P
     o, s, t = spec.options, spec.source, spec.target
     notes: list[str] = []
     rctx = None
+    sconn = None
     # ---- source
     if s.is_file and o.strategy != "full":
         raise JobError("Files are always loaded whole: use the 'full' strategy")
@@ -420,8 +423,34 @@ def prepare(spec: JobIn, session: Session, job_id: uuid.UUID | None = None) -> P
         tgt.prepare_target(t.table, tgt_cols, t.mode, t.keys, TargetOptions(order_by=t.order_by, partition_by=t.partition_by, ddl=custom_ddl(t)), t.create, False)
     except ValueError as e:
         raise JobError(str(e)) from e
+    drivers = choose_drivers(spec, src, sconn, tgt, tconn, req, TargetCtx(t.table, tgt_cols, t.mode, t.keys, bool(existing)), notes)
     return Prepared(spec, src, tgt, req, out, Transformer(read_cols_sel, out), tgt_cols, bool(existing), unique,
-                    split_logical, src_key, tgt_key, notes, steps=compile_steps(spec.steps), remote=rctx)
+                    split_logical, src_key, tgt_key, notes, steps=compile_steps(spec.steps), remote=rctx, drivers=drivers)
+
+
+def choose_drivers(spec: JobIn, src: Any, sconn: Connection | None, tgt: Any, tconn: Connection, req: ReadRequest,
+                   tctx: TargetCtx, notes: list[str]) -> dict[str, Choice]:
+    """The driver option per side, checked before anything is written (fallback notes go to `notes`)."""
+    o = spec.options
+    out: dict[str, Choice] = {}
+    sides = [("target", tgt, tconn, o.target_driver, tctx)]
+    if sconn is not None:  # a database source (files, remote files and combined sources have no driver choice)
+        sides.insert(0, ("source", src, sconn, o.source_driver, req))
+    for side, adapter, conn, override, ctx in sides:
+        try:
+            ch = choose(adapter, override or conn.driver, side, ctx)
+        except DriverRefused as e:
+            raise JobError(str(e)) from e
+        except Exception as e:  # noqa: BLE001 - probing the source's types failed: the classic driver will report it
+            log.info("driver check failed, using the classic driver: %s", e)
+            ch = None
+        if ch is None:
+            continue
+        adapter.use_driver(side, ch.used)
+        out[side] = ch
+        if ch.why:
+            notes.append(ch.why)
+    return out
 
 
 # ---- planning ------------------------------------------------------------------------
@@ -527,6 +556,7 @@ def make_plan(prep: Prepared, *, sample_rows: int = 2000) -> dict[str, Any]:
         "split_column": prep.req.split_col, "split_unique": prep.unique_split, "workers": lay.workers,
         "splits": [{"idx": s.idx, "label": s.label, "est_rows": s.est_rows, "kind": s.kind} for s in lay.splits],
         "notes": lay.notes, "warnings": lay.warnings, "sample": None,
+        "drivers": {k: v.public() for k, v in prep.drivers.items()},
     }
     if sample_rows and lay.splits:
         t0 = time.perf_counter()
@@ -633,17 +663,20 @@ def _write_rows(ctx: Ctx, writer, table: pa.Table) -> tuple[int, list[Reject]]:
         return w1 + w2, rejects
 
 
-def _process_split(ctx: Ctx, idx: int, spec: SplitSpec, resume: Any) -> None:
+def _process_split(ctx: Ctx, idx: int, spec: SplitSpec, resume: Any, switched: dict[str, str] | None = None) -> None:
+    """`switched`: side -> driver this split uses instead of the job's (a capability error moved it to the classic one)."""
     prep, o, t = ctx.prep, ctx.prep.opts, ctx.prep.spec.target
+    src = prep.src.with_driver("source", switched["source"]) if switched and "source" in switched else prep.src
+    tgt = prep.tgt.with_driver("target", switched["target"]) if switched and "target" in switched else prep.tgt
     sp = dataclasses.replace(spec, extra=dict(spec.extra))
     if resume is not None and spec.resumable:
         if spec.kind == "file":  # a fixed file: skip exactly the rows already committed
             sp.extra["offset"] = resume
         else:
             sp.extra["resume_after" if prep.unique_split else "resume_from"] = resume
-    reject_prefix = prep.src.reject_prefix(spec) if hasattr(prep.src, "reject_prefix") else ""
-    reader = Prefetcher(prep.src.read_batches(prep.req, sp, o.read_chunk), ctx.stop)
-    writer = prep.tgt.open_writer(t.table, prep.target_cols, t.mode, t.keys)
+    reject_prefix = src.reject_prefix(spec) if hasattr(src, "reject_prefix") else ""
+    reader = Prefetcher(src.read_batches(prep.req, sp, o.read_chunk), ctx.stop)
+    writer = tgt.open_writer(t.table, prep.target_cols, t.mode, t.keys)
     pending: list[pa.Table] = []
     pending_rows = pending_read = pending_rej = 0
     last_key: Any = None
@@ -693,11 +726,12 @@ def _run_split(ctx: Ctx, idx: int) -> None:
     tag = f"split {idx + 1}"
     _bump(ctx.job_id, idx, status="running", started_at=utcnow(), error=None)
     joblog.push(ctx.job_id, "info", f"{tag} started: {spec.label}")
+    switched: dict[str, str] = {}
     while True:
         attempts += 1
         _bump(ctx.job_id, idx, attempts=attempts)
         try:
-            _process_split(ctx, idx, spec, resume)
+            _process_split(ctx, idx, spec, resume, switched)
             _bump(ctx.job_id, idx, status="done", finished_at=utcnow())
             joblog.push(ctx.job_id, "info", f"{tag} finished")
             rc = prep.remote
@@ -718,6 +752,12 @@ def _run_split(ctx: Ctx, idx: int) -> None:
             can_resume = spec.resumable and resume is not None and (
                 spec.kind == "file" or prep.unique_split or prep.spec.target.mode == "upsert")
             safe = rows_before == 0 or prep.spec.target.mode == "upsert" or can_resume
+            ch = prep.drivers.get(e.side) if isinstance(e, CapabilityError) else None
+            if ch is not None and not ch.explicit and ch.used != ch.classic and e.side not in switched and safe:
+                switched[e.side] = ch.classic  # auto chose a fast driver that can't do this: the classic one can
+                joblog.push(ctx.job_id, "warn", f"{tag}: {ch.label} stopped ({short_error(e)}); retrying this split "
+                            f"with {ch.classic_label}" + (" from the last committed row" if can_resume and rows_before else ""))
+                continue
             if is_transient(e) and attempts <= o.retries and safe:
                 wait_s = min(2 ** attempts, 20)
                 joblog.push(ctx.job_id, "warn", f"{tag} failed ({short_error(e)}); retry {attempts}/{o.retries} in {wait_s}s"
@@ -875,6 +915,7 @@ def _run_job(job_id: uuid.UUID | str) -> str:
                         "target_columns": [{**o.target.to_dict(), "source_name": o.source} for o in prep.out],
                         "target_exists": prep.target_exists, "ddl": lay.ddl, "split_column": prep.req.split_col,
                         "notes": lay.notes, "warnings": lay.warnings,
+                        "drivers": {k: v.public() for k, v in prep.drivers.items()},
                     }
                     job.rows_total, job.rows_total_exact, job.splits_total, job.workers = lay.total, lay.exact, len(lay.splits), lay.workers
                     for sp in lay.splits:
@@ -882,6 +923,8 @@ def _run_job(job_id: uuid.UUID | str) -> str:
                     for line in lay.ddl:
                         joblog.push(jid, "info", "target: " + line.splitlines()[0][:120])
                     joblog.push(jid, "info", f"{len(lay.splits)} splits on {prep.req.split_col or 'the whole source'}, {lay.workers} workers")
+                    for side, ch in prep.drivers.items():
+                        joblog.push(jid, "info", f"{side} driver: {ch.label}" + (f" ({ch.why})" if ch.why else ""))
                     s.commit()
         except Exception as e:  # noqa: BLE001
             from ..remote import NothingToLoad

@@ -25,7 +25,32 @@ def build_connector(conn: Connection) -> Connector:
         raise NeedsCredentials(f"{conn.name} needs credentials: it was imported without its secrets. Edit the "
                                "connection and add them first.")
     secrets = decrypt_secrets(conn.secret_enc)
-    return get_connector(conn.type, conn.config or {}, secrets, timeout=current_settings().connect_timeout_s)
+    connector = get_connector(conn.type, conn.config or {}, secrets, timeout=current_settings().connect_timeout_s)
+    connector.driver_pref = conn.driver  # the adapter's default driver choice (engine/drivers.py)
+    return connector
+
+
+def driver_note(conn: Connection, connector: Connector) -> str | None:
+    """Health check: when the connection's driver is a fast one, can it actually be opened? (catalog work and the
+    test itself always use the classic driver)."""
+    from .engine.adapters import get_adapter
+    from .engine.drivers import AUTO, importable, options_of
+
+    opts = options_of(connector)
+    if not opts or conn.driver is None:
+        return None
+    classic = next(o for o in opts if o.classic)
+    fast = next((o for o in opts if not o.classic and (conn.driver == AUTO or o.id == conn.driver)), None)
+    if fast is None:
+        return None
+    then = f"jobs use {classic.label}" if conn.driver == AUTO else "jobs on this connection are refused"
+    if fast.module and not importable(fast.module):
+        return f"{fast.label}: the {fast.module} package is not installed; {then}"
+    try:
+        err = get_adapter(connector).probe_driver(fast.id)
+    except Exception as e:  # noqa: BLE001
+        err = f"{type(e).__name__}: {e}"
+    return f"{fast.label} can't connect ({' '.join(str(err).split())[:200]}); {then}" if err else None
 
 
 def serialize(conn: Connection) -> ConnectionOut:
@@ -34,7 +59,7 @@ def serialize(conn: Connection) -> ConnectionOut:
         database=(conn.config or {}).get("database"), config=conn.config or {},
         status=conn.status, latency_ms=conn.latency_ms, server_version=conn.server_version,
         note=conn.note, last_checked_at=conn.last_checked_at, created_at=conn.created_at,
-        needs_credentials=conn.needs_credentials,
+        needs_credentials=conn.needs_credentials, driver=conn.driver,
     )
 
 
@@ -65,7 +90,7 @@ def apply_result(conn: Connection, result: TestResult) -> None:
     conn.last_checked_at = now
     if result.ok:
         conn.server_version = result.version or conn.server_version
-        conn.note = "Slow handshake" if result.degraded else None
+        conn.note = result.note or ("Slow handshake" if result.degraded else None)
         if result.learned:  # e.g. an SFTP host key seen for the first time (trust on first use)
             conn.config = {**(conn.config or {}), **result.learned}
     else:
@@ -76,7 +101,11 @@ def _test_one(conn: Connection) -> TestResult:
     if conn.needs_credentials:
         return TestResult(ok=False, error=NEEDS_NOTE)
     try:
-        return build_connector(conn).test()
+        connector = build_connector(conn)
+        result = connector.test()
+        if result.ok:
+            result.note = driver_note(conn, connector)
+        return result
     except SecretKeyError as e:
         return TestResult(ok=False, error=str(e))
     except Exception as e:

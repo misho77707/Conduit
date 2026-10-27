@@ -23,6 +23,7 @@ class TestResult:
     error: str | None = None
     degraded: bool = False
     learned: dict[str, Any] = field(default_factory=dict)  # config to store, see Connector.learned
+    note: str | None = None  # e.g. the connection's fast driver could not be opened (jobs fall back)
 
     @property
     def status(self) -> str:
@@ -34,6 +35,27 @@ class TestResult:
         d = asdict(self)
         d["status"] = self.status
         return d
+
+
+@dataclass(frozen=True)
+class DriverOption:
+    """One way to move data in or out of a database (engine/drivers.py chooses between them per job side).
+
+    `read` / `write`: which side it serves; an option may combine a read and a write method. `classic`: today's
+    driver, the fallback, which never fails a capability check. `module`: the package it needs (None: always there).
+    """
+
+    id: str
+    label: str
+    note: str
+    read: bool = True
+    write: bool = True
+    classic: bool = False
+    module: str | None = None
+
+    def public(self) -> dict[str, Any]:
+        return {"id": self.id, "label": self.label, "note": self.note, "read": self.read, "write": self.write,
+                "classic": self.classic}
 
 
 @dataclass
@@ -141,6 +163,8 @@ class Connector(ABC):
     default_port: ClassVar[int | None] = None
     description: ClassVar[str] = ""
     secret_fields: ClassVar[tuple[str, ...]] = ("password",)
+    # Driver options, fastest first, the classic one last (empty: one driver only, nothing to choose).
+    drivers: ClassVar[tuple[DriverOption, ...]] = ()
 
     def __init__(self, config: dict[str, Any], secrets: dict[str, Any], timeout: int = 8):
         self.config = config
@@ -200,4 +224,5 @@ class Connector(ABC):
             "type": cls.type, "label": cls.label, "abbr": cls.abbr, "kind": cls.kind,
             "default_port": cls.default_port, "description": cls.description,
             "secret_fields": list(cls.secret_fields), "category": cls.category,
+            "drivers": [d.public() for d in cls.drivers],
         }

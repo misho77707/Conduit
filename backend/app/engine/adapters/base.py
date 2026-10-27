@@ -205,6 +205,47 @@ class Adapter(ABC):
     def __init__(self, connector):
         self.c = connector
         self.notes = []  # planner remarks shown to the user (fallbacks, version limits ...)
+        # Driver option (connectors/base.DriverOption id) for reading and writing batches: what the connection asks
+        # for ("auto", an id) until engine/drivers.choose() settles it; None where there is only one driver.
+        self.driver: str | None = getattr(connector, "driver_pref", None)
+        self._settled: dict[str, str] = {}  # side -> chosen option id, once checked
+
+    # ---- drivers ---------------------------------------------------------------
+    def driver_problem(self, driver: str, side: str, ctx: Any) -> str | None:
+        """Why `driver` cannot serve this side (source: ctx is the ReadRequest; target: a TargetCtx), else None."""
+        return None
+
+    def probe_driver(self, driver: str) -> str | None:
+        """Open a fast driver's connection and run a trivial query: the error, or None (health checks)."""
+        return None
+
+    def settle(self, side: str, ctx: Any):
+        """Settle the driver for one side from the connection's preference (previews, Compare: no per-job choice).
+        Returns the Choice (None: one driver only); notes say why auto fell back."""
+        from ..drivers import choose
+
+        if side in self._settled:
+            return None
+        ch = choose(self, self.driver, side, ctx)
+        if ch is not None:
+            self.use_driver(side, ch.used)
+            if ch.why:
+                self.notes.append(ch.why)
+        return ch
+
+    def use_driver(self, side: str, driver: str) -> None:
+        self._settled[side] = driver
+
+    def driver_for(self, side: str) -> str | None:
+        return self._settled.get(side)
+
+    def with_driver(self, side: str, driver: str) -> "Adapter":
+        """A copy of this adapter that uses `driver` for one side (a split retried on the classic driver)."""
+        import copy
+
+        other = copy.copy(self)
+        other._settled = {**self._settled, side: driver}
+        return other
 
     # ---- schema ----------------------------------------------------------------
     @abstractmethod

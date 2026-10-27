@@ -201,6 +201,9 @@ class OptionsIn(BaseModel):
     write_batch: int = Field(50_000, ge=100, le=1_000_000)  # rows per insert / commit
     max_rejects: int = Field(1000, ge=-1)  # stop after this many rejected rows (-1 = never stop)
     retries: int = Field(3, ge=0, le=10)
+    # driver option per side for this run (engine/drivers.py); None: the connection's own setting
+    source_driver: str | None = Field(None, max_length=20)
+    target_driver: str | None = Field(None, max_length=20)
 
     @field_validator("timezone")
     @classmethod

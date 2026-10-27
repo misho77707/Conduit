@@ -106,17 +106,23 @@ def test_refused_everything_is_reported_as_a_target_problem(client, auth, src_ta
     assert j["status"] == "failed" and "not bad data" in j["error"]
 
 
-def test_cancel_then_retry_resumes_without_duplicates(client, auth, src_table, monkeypatch):
+WRITERS = {"psycopg": "PgWriter", "adbc": "PgAdbcWriter"}
+
+
+@pytest.mark.parametrize("driver", list(WRITERS))
+def test_cancel_then_retry_resumes_without_duplicates(client, auth, src_table, monkeypatch, driver):
     import time as _t
 
     from app.engine.adapters import pg as pgmod
 
-    orig = pgmod.PgWriter.write
-    monkeypatch.setattr(pgmod.PgWriter, "write", lambda self, t: (_t.sleep(0.4), orig(self, t))[1])  # slow enough that a cancel (noticed within ~1 s) lands midway
+    cls = getattr(pgmod, WRITERS[driver])
+    orig = cls.write
+    monkeypatch.setattr(cls, "write", lambda self, t: (_t.sleep(0.4), orig(self, t))[1])  # slow enough that a cancel (noticed within ~1 s) lands midway
     pg = add_pg(client, auth)
     dst = src_table + "_dst"
     r = client.post("/api/jobs", json=spec(pg, f"public.{src_table}", pg, f"public.{dst}",
-                                           options={"split_column": "id", "workers": 2, "write_batch": 200, "read_chunk": 200}), headers=auth)
+                                           options={"split_column": "id", "workers": 2, "write_batch": 200, "read_chunk": 200,
+                                                    "source_driver": driver, "target_driver": driver}), headers=auth)
     jid = r.json()["id"]
     end = _t.time() + 30
     while _t.time() < end and client.get(f"/api/jobs/{jid}", headers=auth).json()["rows_written"] < 800:
@@ -124,7 +130,7 @@ def test_cancel_then_retry_resumes_without_duplicates(client, auth, src_table, m
     assert client.post(f"/api/jobs/{jid}/cancel", headers=auth).status_code == 200
     j = wait_job(client, auth, jid)
     assert j["status"] == "cancelled" and 0 < j["rows_written"] < N
-    monkeypatch.setattr(pgmod.PgWriter, "write", orig)
+    monkeypatch.setattr(cls, "write", orig)
     assert client.post(f"/api/jobs/{jid}/retry", headers=auth).status_code == 200
     j = wait_job(client, auth, jid)
     assert j["status"] == "succeeded", j
@@ -132,12 +138,14 @@ def test_cancel_then_retry_resumes_without_duplicates(client, auth, src_table, m
     assert _checksum(src_table) == _checksum(dst)
 
 
-def test_transient_failure_retries_from_last_committed_row(client, auth, src_table, monkeypatch):
+@pytest.mark.parametrize("driver", list(WRITERS))
+def test_transient_failure_retries_from_last_committed_row(client, auth, src_table, monkeypatch, driver):
     import psycopg
 
     from app.engine.adapters import pg as pgmod
 
-    orig, calls = pgmod.PgWriter.write, {"n": 0}
+    cls = getattr(pgmod, WRITERS[driver])
+    orig, calls = cls.write, {"n": 0}
 
     def flaky(self, t):
         calls["n"] += 1
@@ -145,10 +153,11 @@ def test_transient_failure_retries_from_last_committed_row(client, auth, src_tab
             raise psycopg.OperationalError("server closed the connection unexpectedly")
         return orig(self, t)
 
-    monkeypatch.setattr(pgmod.PgWriter, "write", flaky)
+    monkeypatch.setattr(cls, "write", flaky)
     pg = add_pg(client, auth)
     dst = src_table + "_dst"
-    j = run(client, auth, spec(pg, f"public.{src_table}", pg, f"public.{dst}", options={"split_column": "id", "workers": 2, "write_batch": 300}))
+    j = run(client, auth, spec(pg, f"public.{src_table}", pg, f"public.{dst}", options={
+        "split_column": "id", "workers": 2, "write_batch": 300, "source_driver": driver, "target_driver": driver}))
     assert j["status"] == "succeeded", j
     assert pg_run(f"select count(*), count(distinct id) from {dst}")[0] == (N, N)
     assert any("retry 1/3" in line["msg"] for line in client.get(f"/api/jobs/{j['id']}/log?n=200", headers=auth).json())

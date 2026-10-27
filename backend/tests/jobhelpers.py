@@ -1,4 +1,5 @@
 """Shared helpers for load-engine tests: live-database availability, connection setup, waiting for jobs."""
+import os
 import shutil
 import socket
 import time
@@ -27,15 +28,20 @@ def _docker_socket_open(path: str = "/var/run/docker.sock") -> bool:
         return False
 
 
-needs_pg = pytest.mark.skipif(not port_open(5432), reason="needs local PostgreSQL :5432 (conduit/conduit)")
-needs_mysql = pytest.mark.skipif(not port_open(3306), reason="needs local MySQL/MariaDB :3306 (conduit/conduit)")
-needs_ch = pytest.mark.skipif(not port_open(8123), reason="needs local ClickHouse :8123 (default user, database conduit)")
+# Live servers: localhost by default; CONDUIT_TEST_PG_HOST / _MY_HOST / _CH_HOST point the suite elsewhere (e.g. the
+# benchmark containers on a Docker network).
+PG_HOST = os.environ.get("CONDUIT_TEST_PG_HOST", "127.0.0.1")
+MY_HOST = os.environ.get("CONDUIT_TEST_MY_HOST", "127.0.0.1")
+CH_HOST = os.environ.get("CONDUIT_TEST_CH_HOST", "127.0.0.1")
+needs_pg = pytest.mark.skipif(not port_open(5432, PG_HOST), reason="needs local PostgreSQL :5432 (conduit/conduit)")
+needs_mysql = pytest.mark.skipif(not port_open(3306, MY_HOST), reason="needs local MySQL/MariaDB :3306 (conduit/conduit)")
+needs_ch = pytest.mark.skipif(not port_open(8123, CH_HOST), reason="needs local ClickHouse :8123 (default user, database conduit)")
 needs_docker = pytest.mark.skipif(not (_docker_socket_open() and shutil.which("docker")),
                                   reason="needs a local Docker daemon (/var/run/docker.sock) and the docker CLI")
 
-PG = {"host": "127.0.0.1", "port": 5432, "database": "conduit", "user": "conduit"}
-MY = {"host": "127.0.0.1", "port": 3306, "database": "conduit", "user": "conduit"}
-CH = {"host": "127.0.0.1", "port": 8123, "database": "conduit", "user": "default"}
+PG = {"host": PG_HOST, "port": 5432, "database": "conduit", "user": "conduit"}
+MY = {"host": MY_HOST, "port": 3306, "database": "conduit", "user": "conduit"}
+CH = {"host": CH_HOST, "port": 8123, "database": "conduit", "user": "default"}
 
 
 def uniq(prefix: str = "t") -> str:

@@ -3,6 +3,8 @@ import socket
 import pytest
 
 from app.connectors import get_connector
+from jobhelpers import CH_HOST, MY_HOST, PG_HOST
+
 from app.connectors.base import Connector, TableSchema, parse_extra, redact
 from app.connectors.mongo import mask_uri
 
@@ -104,7 +106,7 @@ def test_duckdb_inspect_with_and_without_pk(env):
 
 def _pg_up() -> bool:
     try:
-        socket.create_connection(("127.0.0.1", 5432), timeout=1).close()
+        socket.create_connection((PG_HOST, 5432), timeout=1).close()
         return True
     except OSError:
         return False
@@ -112,7 +114,7 @@ def _pg_up() -> bool:
 
 def _mysql_up() -> bool:
     try:
-        socket.create_connection(("127.0.0.1", 3306), timeout=1).close()
+        socket.create_connection((MY_HOST, 3306), timeout=1).close()
         return True
     except OSError:
         return False
@@ -120,7 +122,7 @@ def _mysql_up() -> bool:
 
 def _ch_up() -> bool:
     try:
-        socket.create_connection(("127.0.0.1", 8123), timeout=1).close()
+        socket.create_connection((CH_HOST, 8123), timeout=1).close()
         return True
     except OSError:
         return False
@@ -135,7 +137,7 @@ def test_mysql_connector_lists_every_accessible_schema():
     """
     import pymysql
 
-    admin = pymysql.connect(host="127.0.0.1", port=3306, user="conduit", password="conduit", autocommit=True)
+    admin = pymysql.connect(host=MY_HOST, port=3306, user="conduit", password="conduit", autocommit=True)
     try:
         with admin.cursor() as cur:
             cur.execute("CREATE DATABASE IF NOT EXISTS conduit_zz2")
@@ -146,11 +148,11 @@ def test_mysql_connector_lists_every_accessible_schema():
     try:
         # `database` is pinned to just one of the two schemas, but both must still be listed: the
         # connection's `database` narrows the driver's default schema, not what the user can see.
-        cfg = {"host": "127.0.0.1", "port": 3306, "user": "conduit", "database": "conduit"}
+        cfg = {"host": MY_HOST, "port": 3306, "user": "conduit", "database": "conduit"}
         names = {t.name for t in get_connector("mysql", cfg, {"password": "conduit"}).list_tables()}
         assert "conduit.zz_conn_test" in names and "conduit_zz2.zz_conn_test2" in names
     finally:
-        admin = pymysql.connect(host="127.0.0.1", port=3306, user="conduit", password="conduit", autocommit=True)
+        admin = pymysql.connect(host=MY_HOST, port=3306, user="conduit", password="conduit", autocommit=True)
         with admin.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS conduit.zz_conn_test")
             cur.execute("DROP DATABASE IF EXISTS conduit_zz2")
@@ -162,7 +164,7 @@ def test_clickhouse_connector_lists_every_accessible_database():
     """list_tables() must not be pinned to config['database'] - it should see every database the user can."""
     import clickhouse_connect
 
-    admin = clickhouse_connect.get_client(host="127.0.0.1", port=8123)
+    admin = clickhouse_connect.get_client(host=CH_HOST, port=8123)
     try:
         admin.command("CREATE DATABASE IF NOT EXISTS conduit_zz2")
         admin.command("CREATE TABLE IF NOT EXISTS conduit.zz_conn_test(id UInt64) ENGINE=MergeTree ORDER BY id")
@@ -170,11 +172,11 @@ def test_clickhouse_connector_lists_every_accessible_database():
     finally:
         admin.close()
     try:
-        cfg = {"host": "127.0.0.1", "port": 8123, "database": "conduit"}
+        cfg = {"host": CH_HOST, "port": 8123, "database": "conduit"}
         names = {t.name for t in get_connector("clickhouse", cfg, {}).list_tables()}
         assert "conduit.zz_conn_test" in names and "conduit_zz2.zz_conn_test2" in names
     finally:
-        admin = clickhouse_connect.get_client(host="127.0.0.1", port=8123)
+        admin = clickhouse_connect.get_client(host=CH_HOST, port=8123)
         admin.command("DROP TABLE IF EXISTS conduit.zz_conn_test")
         admin.command("DROP DATABASE IF EXISTS conduit_zz2")
         admin.close()
@@ -206,8 +208,8 @@ def test_mongo_connector_lists_every_accessible_database(monkeypatch):
 def test_postgres_connector_against_real_server():
     import psycopg
 
-    cfg = {"host": "127.0.0.1", "port": 5432, "database": "conduit", "user": "conduit"}
-    with psycopg.connect("host=127.0.0.1 dbname=conduit user=conduit password=conduit", autocommit=True) as c:
+    cfg = {"host": PG_HOST, "port": 5432, "database": "conduit", "user": "conduit"}
+    with psycopg.connect(f"host={PG_HOST} dbname=conduit user=conduit password=conduit", autocommit=True) as c:
         c.execute("drop table if exists public.zz_conn_test")
         c.execute("create table public.zz_conn_test(id bigint primary key, ts timestamptz)")
         c.execute("insert into public.zz_conn_test select g, now() from generate_series(1, 500) g")
@@ -228,5 +230,5 @@ def test_postgres_connector_against_real_server():
         bad = get_connector("postgres", cfg, {"password": "wrong-password"}).test()
         assert not bad.ok and "wrong-password" not in bad.error
     finally:
-        with psycopg.connect("host=127.0.0.1 dbname=conduit user=conduit password=conduit", autocommit=True) as c:
+        with psycopg.connect(f"host={PG_HOST} dbname=conduit user=conduit password=conduit", autocommit=True) as c:
             c.execute("drop table if exists public.zz_conn_test")

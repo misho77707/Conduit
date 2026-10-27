@@ -1,6 +1,6 @@
 import psycopg
 
-from .base import ColumnInfo, Connector, SplitCandidate, TableInfo, TableSchema, parse_extra
+from .base import ColumnInfo, Connector, DriverOption, SplitCandidate, TableInfo, TableSchema, parse_extra
 
 _NUMERIC_TYPES = ("smallint", "integer", "bigint", "numeric", "real", "double precision")
 _TIME_TYPES = ("timestamp", "date")
@@ -13,8 +13,23 @@ class PostgresConnector(Connector):
     kind = "host"
     default_port = 5432
     description = "Relational · v12–17"
+    drivers = (
+        DriverOption("adbc", "ADBC (Arrow, binary COPY)", "Arrow batches straight from binary COPY, both ways; a few "
+                     "column types (arrays, intervals, network addresses ...) still read through psycopg.",
+                     module="adbc_driver_postgresql"),
+        DriverOption("psycopg", "psycopg (classic)", "Rows through Python: every type, slower.", classic=True),
+    )
 
     def _connect(self) -> psycopg.Connection:
+        return psycopg.connect(**self.conn_kwargs(), autocommit=True)
+
+    def conninfo(self) -> str:
+        """The same connection as a libpq conninfo string (what ADBC takes)."""
+        from psycopg.conninfo import make_conninfo
+
+        return make_conninfo(**{k: v for k, v in self.conn_kwargs().items() if v is not None})
+
+    def conn_kwargs(self) -> dict:
         c = self.config
         kwargs = dict(
             host=c.get("host"), port=int(c.get("port") or self.default_port),
@@ -25,7 +40,7 @@ class PostgresConnector(Connector):
         if c.get("ssl"):
             kwargs["sslmode"] = c["ssl"]
         kwargs.update(parse_extra(c.get("extra")))
-        return psycopg.connect(**kwargs, autocommit=True)
+        return kwargs
 
     def _test(self) -> tuple[str, str]:
         with self._connect() as conn, conn.cursor() as cur:

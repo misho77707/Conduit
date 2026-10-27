@@ -1,4 +1,11 @@
-"""PostgreSQL adapter: server-side cursor reads, quantile / ctid splits, COPY writes, ON CONFLICT upserts."""
+"""PostgreSQL adapter: quantile / ctid splits, ON CONFLICT upserts, and two drivers for moving rows:
+
+psycopg (classic): server-side cursor reads, text COPY writes, every value through Python.
+adbc: Arrow batches straight from binary COPY both ways (ADBC). Reads handle the column types in _ADBC_READ (numeric
+arrives as text, uuid is read as text, json / jsonb are re-shaped like the classic path in arrowconv.from_driver);
+any other type keeps the source on psycopg. Writes take every type: straight into the table when each column
+accepts binary COPY of its Arrow type, else through a temp staging table and INSERT ... SELECT (upserts always).
+"""
 from __future__ import annotations
 
 import datetime as dt
@@ -10,12 +17,14 @@ from typing import Any
 import psycopg
 import pyarrow as pa
 
-from ..arrowconv import dedupe_last, last_value, rows_to_table_lenient, table_rows
+from ..arrowconv import dedupe_last, from_driver, last_value, rows_to_table_lenient, table_rows
 from ..ddl import TargetOptions, create_table_sql, qi, qualified, split_name
+from ..drivers import CapabilityError
 from ..model import Batch, ReadRequest, SplitSpec
-from ..types import ColSpec, clean, normalize
+from ..types import ColSpec, clean, normalize, to_arrow
 from .base import (
     Adapter, SqlDialect, Writer, build_count_sql, build_minmax_sql, build_probe_sql, build_read_sql, equal_bounds,
+    source_sql,
 )
 
 _OID_TYPES = {
@@ -23,6 +32,53 @@ _OID_TYPES = {
     "bool": "BOOLEAN", "date": "DATE", "timestamp": "TIMESTAMP", "timestamptz": "TIMESTAMPTZ", "bytea": "BLOB",
     "json": "TEXT", "jsonb": "TEXT", "uuid": "VARCHAR", "oid": "BIGINT",
 }
+
+
+# ADBC reads: pg_type.typname -> how the column is read. Anything else (arrays, interval, inet / cidr, money, time,
+# timetz, xml, ranges, composites, domains ...) arrives in a shape the classic path doesn't produce: psycopg reads it.
+_ADBC_READ = {
+    **{t: "direct" for t in ("int2", "int4", "int8", "float4", "float8", "bool", "text", "varchar", "bpchar", "date",
+                             "timestamp", "timestamptz", "bytea")},
+    "numeric": "direct",  # text in an opaque extension: cast to the decimal type
+    "uuid": "text",  # read as uuid::text, which is what str(UUID) gives
+    "json": "json", "jsonb": "jsonb",
+}
+# ADBC writes: the Arrow type binary COPY sends for a column, by target typname (enums take text too).
+_ADBC_DIRECT = {"int2": "int16", "int4": "int32", "int8": "int64", "float4": "float", "float8": "double", "bool": "bool",
+                "text": "string", "varchar": "string", "bpchar": "string", "json": "string", "date": "date32[day]",
+                "timestamp": "timestamp[us]", "timestamptz": "timestamp[us, tz=UTC]", "bytea": "binary"}
+_TEXTLIKE = ("text", "varchar", "bpchar", "name")
+
+
+def _stage_type(t: pa.DataType) -> str:
+    """The staging column type for an Arrow type (what ADBC's binary COPY can fill)."""
+    if pa.types.is_decimal(t):
+        return f"numeric({t.precision},{t.scale})"
+    if pa.types.is_timestamp(t):
+        return "timestamptz" if t.tz else "timestamp"
+    return {"int16": "smallint", "int32": "integer", "int64": "bigint", "float": "real", "double": "double precision",
+            "bool": "boolean", "date32[day]": "date", "binary": "bytea"}.get(str(t), "text")
+
+
+def _render(sql: str, params: list[Any]) -> str:
+    """Bind parameters client-side (ADBC takes a plain statement here); %% becomes %."""
+    from psycopg import sql as psql
+
+    return sql % tuple(psql.Literal(p).as_string() for p in params)
+
+
+class AdbcRowError(ValueError):
+    """A data / integrity error (SQLSTATE class 22 / 23) that ADBC reported under another class: the batch is
+    bisected to its bad rows, as with psycopg."""
+
+
+def _adbc_error(side: str, e: Exception) -> Exception:
+    """ADBC's 'not supported' (a type or feature it lacks) is a capability error: the split may retry on psycopg."""
+    if type(e).__name__ == "NotSupportedError":
+        return CapabilityError(side, f"ADBC: {' '.join(str(e).split())[:300]}")
+    if str(getattr(e, "sqlstate", "") or "")[:2] in ("22", "23") and type(e).__name__ not in ("DataError", "IntegrityError"):
+        return AdbcRowError(str(e))
+    return e
 
 
 def _parse_bound(text: str, logical: str) -> Any:
@@ -61,6 +117,55 @@ class PostgresAdapter(Adapter):
         with self.c._connect() as conn, conn.cursor() as cur:
             cur.execute(sql, params)
             return cur.fetchall() if cur.description else []
+
+    # ---- drivers -----------------------------------------------------------------
+    def driver_problem(self, driver: str, side: str, ctx: Any) -> str | None:
+        if driver != "adbc" or side != "source":
+            return None  # ADBC writes take every type (staging + casts where binary COPY can't)
+        for name, (kind, shown) in self._adbc_read_plan(ctx).items():
+            if kind is None:
+                return f"column `{name}` is `{shown}`, which the ADBC read path here doesn't convert"
+        return None
+
+    def probe_driver(self, driver: str) -> str | None:
+        if driver != "adbc":
+            return None
+        import adbc_driver_postgresql.dbapi as adbc
+
+        try:
+            with adbc.connect(self.c.conninfo()) as conn, conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchall()
+        except Exception as e:  # noqa: BLE001
+            return str(e)
+        return None
+
+    def _adbc_read_plan(self, req: ReadRequest) -> dict[str, tuple[str | None, str]]:
+        """name -> (how ADBC reads it, or None if it can't; the type as Postgres shows it), from a zero-row probe."""
+        key = (req.table, req.query, tuple(c.name for c in req.columns))
+        cached = getattr(self, "_plans", {}).get(key)
+        if cached is not None:
+            return cached
+        cols = ", ".join(qi("postgres", c.name) for c in req.columns)
+        with self.c._connect() as conn, conn.cursor() as cur:
+            cur.execute(f"SELECT {cols} FROM {source_sql(self.sql, req)} LIMIT 0", [])
+            oids = [d.type_code for d in cur.description or []]
+            cur.execute("SELECT oid, typname, typtype, format_type(oid, NULL) FROM pg_type WHERE oid = ANY(%s)", [oids])
+            info = {r[0]: r[1:] for r in cur.fetchall()}
+        plan = {}
+        for c, oid in zip(req.columns, oids):
+            typname, typtype, shown = info.get(oid, ("?", "?", f"oid {oid}"))
+            kind = "direct" if typtype == "e" else _ADBC_READ.get(typname)
+            plan[c.name] = (kind, shown)
+        if not hasattr(self, "_plans"):
+            self._plans = {}
+        self._plans[key] = plan
+        return plan
+
+    def _read_driver(self, req: ReadRequest) -> str:
+        if self.driver_for("source") is None and self.driver is not None:
+            self.settle("source", req)  # previews / Compare: the connection's own choice
+        return self.driver_for("source") or "psycopg"
 
     def server_version(self) -> int:
         return int(self._rows("SHOW server_version_num")[0][0])
@@ -196,6 +301,9 @@ class PostgresAdapter(Adapter):
         if split.kind == "ctid":
             lo, hi = split.extra["blk_lo"], split.extra.get("blk_hi")
             extra = [f"ctid >= '({int(lo)},0)'::tid"] + ([f"ctid < '({int(hi)},0)'::tid"] if hi is not None else [])
+        if self._read_driver(req) == "adbc":
+            yield from self._read_adbc(req, split, batch_rows, extra)
+            return
         sql, params = build_read_sql(self.sql, req, split, extra=extra)
         conn = self._open(read_only=True)
         try:
@@ -210,6 +318,41 @@ class PostgresAdapter(Adapter):
                     yield Batch(table, resume, rejects)
         finally:
             conn.close()
+
+    def _read_adbc(self, req: ReadRequest, split: SplitSpec, batch_rows: int, extra: list[str]) -> Iterator[Batch]:
+        import adbc_driver_postgresql.dbapi as adbc
+
+        plan = self._adbc_read_plan(req)
+        exprs = {n: f"{qi('postgres', n)}::text" for n, (k, _) in plan.items() if k == "text"}
+        json_cols = {n: k == "jsonb" for n, (k, _) in plan.items() if k in ("json", "jsonb")}
+        sql, params = build_read_sql(self.sql, req, split, exprs=exprs, extra=extra)
+        conn = adbc.connect(self.c.conninfo())
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET TRANSACTION READ ONLY")
+                cur.execute(_render(sql, params))
+                for rb in cur.fetch_record_batch():
+                    for off in range(0, rb.num_rows, batch_rows):
+                        table, rejects = from_driver(pa.Table.from_batches([rb.slice(off, batch_rows)]), req.columns, json_cols)
+                        resume = last_value(table, split.column) if split.kind == "range" and split.column else None
+                        yield Batch(table, resume, rejects)
+        except Exception as e:  # noqa: BLE001 - re-raised, typed
+            err = _adbc_error("source", e)
+            if err is e:
+                raise
+            raise err from e
+        finally:
+            conn.close()
+
+    def native_columns(self, table: str) -> dict[str, tuple[str, str, str]]:
+        """name -> (typname, typtype, format_type) of an existing table's columns."""
+        schema, name = split_name(table)
+        rows = self._rows(
+            "select a.attname, t.typname, t.typtype, format_type(a.atttypid, a.atttypmod) from pg_attribute a "
+            "join pg_class c on c.oid = a.attrelid join pg_namespace n on n.oid = c.relnamespace "
+            "join pg_type t on t.oid = a.atttypid "
+            "where n.nspname = %s and c.relname = %s and a.attnum > 0 and not a.attisdropped", [schema or "public", name])
+        return {r[0]: (r[1], r[2], r[3]) for r in rows}
 
     # ---- target ------------------------------------------------------------------
     def prepare_target(self, table: str, cols: list[ColSpec], mode: str, keys: list[str], opts: TargetOptions,
@@ -249,7 +392,10 @@ class PostgresAdapter(Adapter):
             raise ValueError(f"Upsert needs a PRIMARY KEY or UNIQUE index on ({', '.join(keys)}) in {table}")
 
     def open_writer(self, table: str, cols: list[ColSpec], mode: str, keys: list[str]) -> Writer:
-        return PgWriter(self._open(), table, cols, keys if mode == "upsert" else [])
+        keys = keys if mode == "upsert" else []
+        if self.driver_for("target") == "adbc":
+            return PgAdbcWriter(self, table, cols, keys)
+        return PgWriter(self._open(), table, cols, keys)
 
 
 class PgWriter(Writer):
@@ -282,6 +428,84 @@ class PgWriter(Writer):
                       ) if nonkey else "DO NOTHING"
             cur.execute(f"INSERT INTO {self.fq} ({self.col_sql}) SELECT {self.col_sql} FROM {self.stg} "
                         f"ON CONFLICT ({conflict}) {action}")
+
+    def close(self) -> None:
+        try:
+            self.conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+class PgAdbcWriter(Writer):
+    """ADBC ingest (binary COPY of the Arrow batch). One transaction per write(), like PgWriter."""
+
+    def __init__(self, adapter: PostgresAdapter, table: str, cols: list[ColSpec], keys: list[str]):
+        import adbc_driver_postgresql.dbapi as adbc
+
+        schema, name = split_name(table)
+        self.schema, self.name, self.keys = schema or "public", name, keys
+        self.fq = qualified("postgres", table)
+        names = [c.name for c in cols]
+        col_sql = ", ".join(qi("postgres", n) for n in names)
+        natives = adapter.native_columns(table)
+        arrow = {c.name: to_arrow(c.logical) for c in cols}
+
+        def direct(n: str) -> bool:
+            typname, typtype, _ = natives.get(n, ("?", "?", "?"))
+            want = "string" if typtype == "e" else _ADBC_DIRECT.get(typname)
+            return want is not None and (str(arrow[n]) == want or (typname == "numeric" and pa.types.is_decimal(arrow[n])))
+
+        self.direct = not keys and all(direct(n) for n in names)
+        self.conn = adbc.connect(adapter.c.conninfo())
+        if self.direct:
+            return
+        self.stg = "conduit_stg_" + uuid.uuid4().hex[:8]
+        sel = []
+        for n in names:
+            typname, _, shown = natives.get(n, ("?", "?", "text"))
+            staged = _stage_type(arrow[n])
+            # text staged into a non-text column needs an explicit cast (text -> jsonb / uuid / enum / arrays ...);
+            # everything else is an assignment cast, which (unlike an explicit one) refuses over-long values
+            sel.append(f"{qi('postgres', n)}::{shown}" if staged == "text" and typname not in _TEXTLIKE else qi("postgres", n))
+        insert = f"INSERT INTO {self.fq} ({col_sql}) SELECT {', '.join(sel)} FROM {self.stg}"
+        if keys:
+            nonkey = [n for n in names if n not in keys]
+            conflict = ", ".join(qi("postgres", k) for k in keys)
+            action = ("DO UPDATE SET " + ", ".join(f"{qi('postgres', n)} = EXCLUDED.{qi('postgres', n)}" for n in nonkey)
+                      ) if nonkey else "DO NOTHING"
+            insert += f" ON CONFLICT ({conflict}) {action}"
+        self.insert = insert
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(f"CREATE TEMP TABLE {self.stg} ("
+                            + ", ".join(f"{qi('postgres', n)} {_stage_type(arrow[n])}" for n in names)
+                            + ") ON COMMIT DELETE ROWS")
+            self.conn.commit()
+        except Exception:
+            self.close()
+            raise
+
+    def write(self, table: pa.Table) -> None:
+        if table.num_rows == 0:
+            return
+        table = dedupe_last(table, self.keys)
+        try:
+            with self.conn.cursor() as cur:
+                if self.direct:
+                    cur.adbc_ingest(self.name, table, mode="append", db_schema_name=self.schema)
+                else:
+                    cur.adbc_ingest(self.stg, table, mode="append", temporary=True)
+                    cur.execute(self.insert)
+            self.conn.commit()
+        except Exception as e:  # noqa: BLE001 - re-raised, typed
+            try:
+                self.conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            err = _adbc_error("target", e)
+            if err is e:
+                raise
+            raise err from e
 
     def close(self) -> None:
         try:

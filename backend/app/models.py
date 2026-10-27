@@ -60,6 +60,8 @@ class Connection(Base):
     secret_enc: Mapped[str] = mapped_column(Text, default="")
     # imported without its secrets: unusable (no health checks, tests, previews or jobs) until edited with them
     needs_credentials: Mapped[bool] = mapped_column(default=False)
+    # driver option that moves its data (engine/drivers.py): "auto", an option id, or NULL (one driver only)
+    driver: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
     # Current state (overwritten on every check)
     status: Mapped[str] = mapped_column(String(12), default="idle")  # ok | warn | err | idle
