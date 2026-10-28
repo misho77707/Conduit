@@ -49,6 +49,7 @@ export function buildOptions(s: WizardState): OptionsIn {
     strategy, split_column, lo, hi, timezone: s.timezone, workers: s.workers,
     splits: null, split_rows: null, read_chunk: s.chunk, write_batch: s.chunk,
     max_rejects: s.rejectToFile ? -1 : 0, retries: 3,
+    ...(isFile ? { target_driver: s.movement.target_driver } : s.movement),
   };
 }
 

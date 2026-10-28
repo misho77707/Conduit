@@ -16,6 +16,17 @@ export function newStepId(kind: StepKind): string {
   return `${kind}_${Date.now().toString(36)}${seq}`;
 }
 
+export type PyEngine = "pandas" | "polars";
+
+/** A Python step's untouched starter code, per engine (switching engine swaps it while it is untouched). */
+export const PY_TEMPLATES: Record<PyEngine, string> = {
+  pandas: "def transform(df):\n    # df is a pandas DataFrame\n    return df",
+  polars: "def transform(df):\n    # df is a Polars DataFrame: return df.with_columns(...), df.filter(...) ...\n    return df",
+};
+
+/** A Python step's engine: steps saved before Polars existed have none, and are pandas. */
+export const pyEngine = (config: Record<string, unknown>): PyEngine => (config.engine === "polars" ? "polars" : "pandas");
+
 export function defaultConfig(kind: StepKind): Record<string, unknown> {
   switch (kind) {
     case "rename": return { mapping: {} };
@@ -24,7 +35,7 @@ export function defaultConfig(kind: StepKind): Record<string, unknown> {
     case "derive": return { column: "", expr: "" };
     case "split": return { column: "", drop_source: false, into: [] };
     case "sql": return { sql: "SELECT *\nFROM {{ input }}\n" };
-    case "python": return { code: "def transform(df):\n    # df is a pandas DataFrame\n    return df" };
+    case "python": return { engine: "polars", code: PY_TEMPLATES.polars };  // new steps: Polars
   }
 }
 
@@ -41,6 +52,6 @@ export function stepSummary(step: StepIn): string {
     case "derive": return c.column ? `${c.column} = ${c.expr || "…"}` : "no column yet";
     case "split": return c.column ? `${c.column} → ${(c.into || []).length} column(s)` : "no column yet";
     case "sql": return (c.sql || "").split("\n")[0] || "empty";
-    case "python": return "transform(df)";
+    case "python": return `transform(df) · ${pyEngine(c)}`;
   }
 }

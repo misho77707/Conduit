@@ -48,6 +48,8 @@ export function AddConnectionModal({ connection, initialTypes, onClose, onSaved 
         port: c.port != null ? String(c.port) : t.default_port ? String(t.default_port) : "",
         database: String(c.database ?? ""), user: String(c.user ?? ""), password: "",
         ssl: String(c.ssl ?? "disable"), extra: String(c.extra ?? ""),
+        driver: connection.driver ?? undefined,
+        ch_collection: String(c.ch_collection ?? ""), ch_address: String(c.ch_address ?? ""),
       });
     } else if (t.kind === "uri") {
       setForm({ name: connection.name, uri: "", database: String(c.database ?? ""), auth_source: String(c.auth_source ?? ""), tls: !!c.tls });
@@ -68,12 +70,13 @@ export function AddConnectionModal({ connection, initialTypes, onClose, onSaved 
     setType(t);
     setTest({ state: "idle" });
     setForm({ name: "", port: t.default_port ? String(t.default_port) : "", ssl: "disable", database: "", user: "", read_only: false, create_if_missing: false, tls: false,
-      region: t.kind === "s3" ? "us-east-1" : "", path_style: false });
+      region: t.kind === "s3" ? "us-east-1" : "", path_style: false, driver: t.drivers.length ? "auto" : undefined });
   };
 
   const set = (patch: Partial<Form>) => { setForm((f) => ({ ...f, ...patch })); setTest({ state: "idle" }); };
 
   const { config, secrets } = useMemo(() => buildPayload(type, form), [type, form]);
+  const driver = type?.drivers.length ? String(form.driver || "auto") : undefined;
   // what a successful test discovered (an SFTP host key: trusted on first use) is saved with the connection
   const learned = test.state === "ok" ? test.result?.learned || {} : {};
 
@@ -94,11 +97,11 @@ export function AddConnectionModal({ connection, initialTypes, onClose, onSaved 
     try {
       if (isEdit && connection) {
         const name = String(form.name || "").trim() || connection.name;
-        const conn = await connectionsApi.update(connection.id, { name, config: { ...config, ...learned }, secrets });
+        const conn = await connectionsApi.update(connection.id, { name, driver, config: { ...config, ...learned }, secrets });
         toast("ok", `Updated ${conn.name}`, test.state === "ok" ? "Connection verified." : "Not re-tested — run a test from the list.");
       } else {
         const name = String(form.name || "").trim() || type.type;
-        const conn = await connectionsApi.create({ name, type: type.type, config: { ...config, ...learned }, secrets });
+        const conn = await connectionsApi.create({ name, type: type.type, driver, config: { ...config, ...learned }, secrets });
         toast("ok", `Saved ${conn.name}`, test.state === "ok" ? "Connection verified and added to background checks." : "Saved without testing. Run a test from the list.");
       }
       onSaved();
@@ -193,6 +196,18 @@ export function AddConnectionModal({ connection, initialTypes, onClose, onSaved 
                   <TextArea rows={2} value={String(form.extra || "")} onChange={(e) => set({ extra: e.target.value })} />
                 </Field>
               </div>
+              {type.drivers.length > 0 && <DriverField options={type.drivers} value={String(form.driver || "auto")} onChange={(v) => set({ driver: v })} />}
+              {type.ch_pull && (
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 12 }}>
+                  <Field label="ClickHouse named collection for direct pulls · optional"
+                    hint="Made by a ClickHouse admin with this database's host, port, user, password and database; Conduit never sees that password.">
+                    <Input value={String(form.ch_collection || "")} onChange={(e) => set({ ch_collection: e.target.value })} placeholder="pg_prod" />
+                  </Field>
+                  <Field label="Address as ClickHouse sees it · optional" hint="host or host:port, when ClickHouse reaches this database by another address than the collection's.">
+                    <Input value={String(form.ch_address || "")} onChange={(e) => set({ ch_address: e.target.value })} placeholder="db.internal:5432" />
+                  </Field>
+                </div>
+              )}
             </>
           )}
 
@@ -301,6 +316,9 @@ export function AddConnectionModal({ connection, initialTypes, onClose, onSaved 
           {test.state === "ok" && test.result && (
             <StatusBox tone="ok" icon="check_circle" title={`Connected${test.result.version ? ` · ${test.result.version}` : ""}${test.result.latency_ms != null ? ` · ${test.result.latency_ms} ms` : ""}`} sub={test.result.detail || undefined} />
           )}
+          {test.state === "ok" && test.result?.note && (
+            <StatusBox tone="warn" icon="warning" title="Driver" sub={test.result.note} />
+          )}
           {test.state === "fail" && (
             <StatusBox tone="err" icon="error" title="Connection failed" sub={test.result?.error || undefined} />
           )}
@@ -310,7 +328,25 @@ export function AddConnectionModal({ connection, initialTypes, onClose, onSaved 
   );
 }
 
-function StatusBox({ tone, icon, title, sub, spin }: { tone: "accent" | "ok" | "err"; icon: string; title: string; sub?: string; spin?: boolean }) {
+/** The connection's driver: automatic (the fastest that can run each job, else the classic one) or one fixed option. */
+function DriverField({ options, value, onChange }: { options: DbTypeOut["drivers"]; value: string; onChange: (v: string) => void }) {
+  const picked = options.find((o) => o.id === value);
+  const fast = options.find((o) => !o.classic);
+  const classic = options.find((o) => o.classic);
+  const hint = !picked
+    ? `Each job uses ${fast?.label ?? "the fastest option"} when it can run it, else ${classic?.label ?? "the classic driver"}; the job says why.`
+    : picked.classic ? picked.note : `${picked.note} A job it can't run is refused, not moved to ${classic?.label ?? "the classic driver"}.`;
+  return (
+    <Field label="Driver" hint={hint}>
+      <Select value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="auto">Automatic: the fastest that can run each job</option>
+        {options.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+      </Select>
+    </Field>
+  );
+}
+
+function StatusBox({ tone, icon, title, sub, spin }: { tone: "accent" | "ok" | "err" | "warn"; icon: string; title: string; sub?: string; spin?: boolean }) {
   return (
     <div style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: 12, borderRadius: 8, background: `var(--${tone}-soft)`, color: `var(--${tone})` }}>
       <Icon name={icon} spin={spin} />
@@ -337,6 +373,10 @@ function buildPayload(type: DbTypeOut | null, form: Form): { config: Record<stri
     if (form.password) put("password", form.password);
     put("ssl", form.ssl || "disable");
     if (form.extra) put("extra", form.extra);
+    if (type.ch_pull) {  // always sent, so clearing a field on edit clears the stored value
+      put("ch_collection", String(form.ch_collection || "").trim());
+      put("ch_address", String(form.ch_address || "").trim());
+    }
   } else if (type.kind === "uri") {
     if (form.uri) put("uri", form.uri);
     put("database", form.database || "");

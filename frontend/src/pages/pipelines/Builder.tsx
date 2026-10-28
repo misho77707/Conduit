@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
-  connectionsApi, pipelinesApi, type ConnectionOut, type OptionsIn, type PipelineOut,
-  type PipelinePreviewOut, type SourceIn, type StepIn, type StepKind, type TargetIn,
+  connectionsApi, jobsApi, metaApi, pipelinesApi, type ConnectionOut, type DbTypeOut, type JobPlan, type OptionsIn,
+  type PipelineOut, type PipelinePreviewOut, type SourceIn, type StepIn, type StepKind, type TargetIn, type TransferMethodInfo,
 } from "../../lib/api";
+import { MovementEditor } from "../jobs/RowMovement";
 import { useToast } from "../../lib/toast";
 import { cronLabel, untilTime } from "../../lib/format";
 import { Icon } from "../../ui/Icon";
@@ -48,6 +49,26 @@ export function Builder() {
   const reqId = useRef(0);
 
   useEffect(() => { connectionsApi.list().then(setConns).catch(() => {}); }, []);
+  const [dbTypes, setDbTypes] = useState<Record<string, DbTypeOut>>({});
+  useEffect(() => { metaApi.dbTypes().then((ts) => setDbTypes(Object.fromEntries(ts.map((t) => [t.type, t])))).catch(() => {}); }, []);
+
+  // How rows move (Load panel): a plan of source -> target without the steps tells whether ClickHouse could pull
+  // the source itself and which drivers auto picks. Only for a database table / query source with no steps: a
+  // step chain always runs in Conduit, and files / combined sources have no driver or pull choice.
+  const [movePlan, setMovePlan] = useState<{ method: TransferMethodInfo | null; drivers?: JobPlan["drivers"] } | null>(null);
+  const moveKey = draft && selected === "target" && draft.target.connection_id && draft.target.table.trim()
+    && draft.source.connection_id && (draft.source.table || draft.source.query) && !draft.steps.length
+    ? JSON.stringify([draft.source, draft.target, draft.options]) : null;
+  useEffect(() => {
+    if (!moveKey || !draft) return;
+    const t = setTimeout(() => {
+      jobsApi.plan({ source: draft.source, target: draft.target, options: { ...draft.options, transfer_method: null } }, 0)
+        .then((p) => setMovePlan({ method: p.transfer_method ?? null, drivers: p.drivers }))
+        .catch(() => setMovePlan(null));
+    }, 700);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [moveKey]);
 
   useEffect(() => {
     if (!id) return;
@@ -249,7 +270,17 @@ export function Builder() {
           {selected === "target" && (
             <>
               <PanelHeader icon="output" title="Load" mode="Target" />
-              <div style={{ padding: 14 }}><TargetEditor value={draft.target} onChange={(v) => setDraft({ ...draft, target: v })} conns={conns} /></div>
+              <div style={{ padding: 14, display: "flex", flexDirection: "column", gap: 14 }}>
+                <TargetEditor value={draft.target} onChange={(v) => setDraft({ ...draft, target: v })} conns={conns} />
+                <MovementEditor dbTypes={dbTypes} drivers={movePlan?.drivers}
+                  method={draft.steps.length && draft.options.transfer_method === "clickhouse_pull"
+                    ? { used: "conduit", eligible: false, why: "pipeline steps run in Conduit, so the rows have to pass through it", collection: null, limits: [] }
+                    : draft.steps.length ? null : movePlan?.method}
+                  sourceConn={draft.source.connection_id && !draft.source.combined ? conns.find((c) => c.id === draft.source.connection_id) : undefined}
+                  targetConn={conns.find((c) => c.id === draft.target.connection_id)}
+                  value={{ source_driver: draft.options.source_driver ?? null, target_driver: draft.options.target_driver ?? null, transfer_method: draft.options.transfer_method ?? null }}
+                  onChange={(m) => setDraft({ ...draft, options: { ...draft.options, ...m } })} />
+              </div>
             </>
           )}
           {selectedStep && (

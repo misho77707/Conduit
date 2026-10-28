@@ -1,13 +1,15 @@
-import { useState, type ReactNode } from "react";
+import { useCallback, useState, type ReactNode } from "react";
 import type { StepIn } from "../../lib/api";
 import { LOGICAL_TYPES } from "../../lib/constants";
 import { Icon } from "../../ui/Icon";
 import { Input, Select, TextArea } from "../../ui/Input";
 import { Button } from "../../ui/Button";
 import { ToggleRow } from "../../ui/Toggle";
+import { SegmentedControl } from "../../ui/SegmentedControl";
 import { CodeEditor } from "./CodeEditor";
 import { PythonGuide } from "./PythonGuide";
-import { defaultConfig } from "./types";
+import { complete } from "./pyComplete";
+import { PY_TEMPLATES, pyEngine, type PyEngine } from "./types";
 
 function Row({ children }: { children: ReactNode }) {
   return <div style={{ display: "flex", gap: 8, alignItems: "center" }}>{children}</div>;
@@ -116,32 +118,50 @@ export function StepEditor({ step, onChange, inputColumns }: { step: StepIn; onC
     );
   }
 
-  return <PythonStep code={c.code || ""} onChange={(code) => onChange({ code })} columns={inputColumns} />;
+  return <PythonStep code={c.code || ""} engine={pyEngine(c)} onChange={(code, engine) => onChange({ ...c, code, engine })} columns={inputColumns} />;
 }
 
-function PythonStep({ code, onChange, columns }: { code: string; onChange: (code: string) => void; columns: string[] }) {
+function PythonStep({ code, engine, onChange, columns }: {
+  code: string; engine: PyEngine; onChange: (code: string, engine: PyEngine) => void; columns: string[];
+}) {
   const [guide, setGuide] = useState(false);
-  const starter = (defaultConfig("python") as { code: string }).code;
+  const untouched = (text: string) => !text.trim() || Object.values(PY_TEMPLATES).some((t) => t.trim() === text.trim());
+  const completer = useCallback((text: string, caret: number, force: boolean) => complete(text, caret, columns, force, engine), [columns, engine]);
 
   function use(example: string) {
-    if (code.trim() && code.trim() !== starter.trim() && !confirm("Replace the current code with this example?")) return;
-    onChange(example);
+    if (!untouched(code) && !confirm("Replace the current code with this example?")) return;
+    onChange(example, engine);
     setGuide(false);
   }
 
+  function switchTo(next: PyEngine) {
+    if (next === engine) return;
+    // the untouched starter follows the engine; edited code only on a yes (it is written for the other library)
+    const replace = untouched(code) || confirm(`Replace your code with the ${next === "polars" ? "Polars" : "pandas"} starter? `
+      + `Cancel keeps it as it is (it was written for ${engine === "polars" ? "Polars" : "pandas"}).`);
+    onChange(replace ? PY_TEMPLATES[next] : code, next);
+  }
+
+  const polars = engine === "polars";
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <div style={{ display: "flex", gap: 8, fontSize: 12, color: "var(--text-3)", alignItems: "center" }}>
-        <Icon name="info" style={{ fontSize: 15 }} />
-        <span style={{ flex: 1 }}>Define <code>def transform(df)</code>: receives and returns a pandas DataFrame. <code>pd</code> and <code>np</code> are ready to use.</span>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <SegmentedControl small value={engine} onChange={switchTo} options={[{ id: "polars", label: "Polars" }, { id: "pandas", label: "pandas" }]} />
+        <span style={{ flex: 1, fontSize: 12, color: "var(--text-3)" }}>
+          {polars
+            ? <>Define <code>def transform(df)</code>: receives a Polars DataFrame, returns a DataFrame or a LazyFrame. <code>pl</code> and <code>np</code> are ready to use.</>
+            : <>Define <code>def transform(df)</code>: receives and returns a pandas DataFrame. <code>pd</code> and <code>np</code> are ready to use.</>}
+        </span>
         <Button height={26} padX={8} icon="menu_book" style={{ fontSize: 12 }} onClick={() => setGuide(true)}>Guide &amp; examples</Button>
       </div>
-      <CodeEditor code={code} onChange={onChange} lang="py" suggest columns={columns} />
+      <CodeEditor code={code} onChange={(v) => onChange(v, engine)} lang="py" suggest columns={columns} completer={completer} />
       <div style={{ fontSize: 11, color: "var(--text-3)" }}>
-        Suggestions appear after <code>df.</code>, <code>df["</code>, <code>.str.</code>, <code>.dt.</code>, <code>pd.</code>, <code>np.</code> · Ctrl+Space anywhere
+        {polars
+          ? <>Suggestions appear after <code>df.</code>, <code>pl.</code>, <code>pl.col("</code>, an expression&rsquo;s <code>.</code>, <code>.str.</code>, <code>.dt.</code>, <code>.list.</code> · Ctrl+Space anywhere</>
+          : <>Suggestions appear after <code>df.</code>, <code>df["</code>, <code>.str.</code>, <code>.dt.</code>, <code>pd.</code>, <code>np.</code> · Ctrl+Space anywhere</>}
         {columns.length > 0 && <> · columns: {columns.join(", ")}</>}
       </div>
-      {guide && <PythonGuide onClose={() => setGuide(false)} onUse={use} columns={columns} />}
+      {guide && <PythonGuide onClose={() => setGuide(false)} onUse={use} columns={columns} engine={engine} />}
     </div>
   );
 }

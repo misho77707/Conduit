@@ -55,6 +55,7 @@ export async function stateFromJob(spec: JobIn): Promise<WizardState> {
   s.chunk = o.read_chunk;
   s.chunkMode = o.read_chunk === 50000 ? "rec" : "custom";
   s.rejectToFile = o.max_rejects !== 0;
+  s.movement = { source_driver: o.source_driver ?? null, target_driver: o.target_driver ?? null, transfer_method: o.transfer_method ?? null };
   if (o.strategy === "full") {
     s.fullSplitColumn = o.split_column || null;
   } else {

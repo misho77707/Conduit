@@ -17,7 +17,8 @@ const KIND_STYLE: Record<Kind, { tag: string; color: string }> = {
 
 /**
  * Highlighted code with a transparent textarea on top. With `suggest`, a completion popup offers pandas / numpy
- * members and the step's input column names (see pyComplete.ts), or what `completer` returns (e.g. SQL names).
+ * members and the step's input column names (see pyComplete.ts), or what `completer` returns (e.g. SQL names, or
+ * pyComplete's Polars catalog for a step on the Polars engine).
  */
 export function CodeEditor({ code, onChange, lang, suggest = false, columns = [], completer }: {
   code: string; onChange: (v: string) => void; lang: "sql" | "py"; suggest?: boolean; columns?: string[];

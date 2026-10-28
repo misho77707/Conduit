@@ -1,3 +1,4 @@
+import { NO_MOVEMENT, type Movement } from "../jobs/RowMovement";
 import type { ColumnOut, ConnectionOut, FileEntry, FileInspectOut, JobPlan, RemoteIn, RemoteMatchOut, TableOut, TableSchemaOut } from "../../lib/api";
 
 export type SourceTab = "upload" | "server" | "remote" | "database";
@@ -55,6 +56,7 @@ export interface WizardState {
   workers: number;
   chunkMode: "rec" | "custom";
   chunk: number;
+  movement: Movement; // driver overrides and the transfer method (chosen on the review step)
 
   // target
   targetConnId: string | null;
@@ -101,7 +103,7 @@ export function initialWizardState(targetConnId: string | null): WizardState {
     columns: [],
     strategy: "full", splitColumn: null, fullSplitColumn: null, lo: "", hi: "", timezone: "UTC",
     afterWatermark: false, lastNDays: false, days: "30", where: "",
-    workers: 4, chunkMode: "rec", chunk: 50000,
+    workers: 4, chunkMode: "rec", chunk: 50000, movement: NO_MOVEMENT,
     targetConnId, tableMode: "new", targetTable: "", targetTables: null, targetTableSchema: null,
     mode: "append", keys: [], rejectToFile: true, ddlText: null,
     plan: null, planLoading: false, planError: null,

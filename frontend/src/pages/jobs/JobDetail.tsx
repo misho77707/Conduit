@@ -8,6 +8,7 @@ import { Button } from "../../ui/Button";
 import { StatusBadge } from "../../ui/Badge";
 import { ProgressBar } from "../../ui/ProgressBar";
 import { useCan } from "../../lib/auth";
+import { MovementSummary } from "./RowMovement";
 
 const ACTIVE = new Set(["queued", "planning", "running", "stalled"]);
 
@@ -158,6 +159,9 @@ export function JobDetail({ jobId, onChanged }: { jobId: string; onChanged: () =
             ))}
           </div>
         )}
+
+        {/* a viewer's plan has notes / warnings only, so this shows nothing to them */}
+        <MovementSummary plan={job.plan as Partial<JobPlan> | null} />
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 1, background: "var(--border)", border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
           <Tile label="Rows written" value={fmtN(job.rows_written)} sub={job.rows_total != null ? `of ${job.rows_total_exact ? "" : "~"}${fmtN(job.rows_total)}` : "no estimate"} />

@@ -9,6 +9,8 @@ import { sourceMode, type WizardState } from "./types";
 import { remoteLabel } from "../remote/RemotePicker";
 import type { WizardCtx } from "./Wizard";
 import { buildJobIn } from "./jobBuilder";
+import { MovementEditor } from "../jobs/RowMovement";
+import type { TransferMethodInfo } from "../../lib/api";
 
 interface Props { s: WizardState; set: (p: Partial<WizardState>) => void; ctx: WizardCtx; onCreated: (id: string) => void; }
 
@@ -24,13 +26,16 @@ export function Step4Review({ s, set, ctx, onCreated }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // the last transfer-method info a plan returned: kept while a plan with the pull chosen fails, so the choice
+  // stays on screen and can be switched back
+  const [method, setMethod] = useState<TransferMethodInfo | null>(null);
   useEffect(() => {
     set({ planLoading: true, planError: null });
     jobsApi.plan(buildJobIn(s), 2000)
-      .then((plan) => set({ plan, planLoading: false }))
-      .catch((e) => set({ planError: e instanceof Error ? e.message : "Could not build a plan", planLoading: false }));
+      .then((plan) => { set({ plan, planLoading: false }); setMethod(plan.transfer_method ?? null); })
+      .catch((e) => set({ plan: null, planError: e instanceof Error ? e.message : "Could not build a plan", planLoading: false }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [s.movement]);
 
   const sourceConn = ctx.conns.find((c) => c.id === s.sourceConnId);
   const targetConn = ctx.conns.find((c) => c.id === s.targetConnId);
@@ -140,6 +145,15 @@ export function Step4Review({ s, set, ctx, onCreated }: Props) {
         </div>
       </Card>
       <Card>
+        {(method || mode === "database" || ctx.dbTypes[targetConn?.type || ""]?.drivers.length) ? (
+          <>
+            <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border)", fontWeight: 600 }}>How rows move</div>
+            <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border)" }}>
+              <MovementEditor value={s.movement} onChange={(movement) => set({ movement })} method={method} drivers={plan?.drivers}
+                sourceConn={mode === "database" ? sourceConn : undefined} targetConn={targetConn} dbTypes={ctx.dbTypes} />
+            </div>
+          </>
+        ) : null}
         <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border)", fontWeight: 600 }}>Pre-flight checks</div>
         {checks.map((c, i) => (
           <div key={i} style={{ display: "flex", gap: 10, padding: "12px 16px", borderBottom: "1px solid var(--border)" }}>

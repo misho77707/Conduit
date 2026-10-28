@@ -2,7 +2,9 @@
 engine choice through the pipelines API. No database needed."""
 import datetime as dt
 import decimal
+import re
 import sqlite3
+from pathlib import Path
 
 import pyarrow as pa
 import pytest
@@ -102,6 +104,80 @@ def test_the_engine_is_checked_and_defaults_to_pandas():
     assert out.column("x").to_pylist() == [2, 4, 6]
     with pytest.raises(StepError, match="engine must be one of: pandas, polars"):
         apply_steps([Step("s1", "python", {"code": pandas_code, "engine": "spark"})], _typed())
+
+
+# ---- the editor's Polars catalog, examples and cheat sheet against the installed Polars ---------------------
+
+_FRONT = Path(__file__).resolve().parents[2] / "frontend" / "src" / "pages" / "pipelines"
+needs_frontend = pytest.mark.skipif(not (_FRONT / "pyComplete.ts").exists(), reason="the frontend sources are not here")
+
+
+def _block(text: str, start: str) -> str:
+    i = text.index(start)
+    return text[i:text.index("];", i)]
+
+
+def _ts_strings(block: str, pattern: str) -> list[str]:
+    """Template literals / string fields of a TS block, JS escapes undone (only \\\\ and \\` occur in them)."""
+    return [s.replace("\\`", "`").replace("\\\\", "\\") for s in re.findall(pattern, block, re.S)]
+
+
+@needs_frontend
+def test_every_polars_name_the_editor_offers_exists():
+    import polars as pl
+
+    ts = (_FRONT / "pyComplete.ts").read_text(encoding="utf-8")
+    owners = {
+        "PL": pl, "PLDF": pl.DataFrame, "LAZY": pl.LazyFrame, "EXPR": pl.Expr, "PLSTR": pl.col("a").str,
+        "PLDT": pl.col("a").dt, "PLLIST": pl.col("a").list, "PLGROUPBY": pl.DataFrame({"a": [1]}).group_by("a"),
+        "PLSERIES": pl.Series, "WHEN": pl.when(True), "THEN": pl.when(True).then(1),
+    }
+    missing, seen = [], 0
+    for const, owner in owners.items():
+        block = _block(ts, f"const {const}: Item[] = [")
+        names = re.findall(r"\b[mpf]\(\s*\"([A-Za-z_]\w*)\"", block)
+        for listed in re.findall(r"\.\.\.\[([^\]]*)\]\.map", block):  # PL's data types
+            names += re.findall(r"\"(\w+)\"", listed)
+        seen += len(names)
+        missing += [f"{const}.{n}" for n in names if not hasattr(owner, n)]
+    assert seen > 200 and not missing, missing
+
+
+_FIXTURE = {
+    "id": [1, 2, 2], "qty": [2, 3, None], "unit_price": [1.5, 2.0, 3.0], "status": ["paid", "open", "paid"],
+    "amount": [1500.0, -3.0, 12000.0], "email": [" A@X.io ", None, "b@y.io"], "name": ["ann lee", "bob", None],
+    "phone": ["+995 (555) 12", None, "555-1"], "posted_at": ["01.02.2024 10:30", "bad", None],
+    "amount_text": ["1,5", "x", None], "created": [dt.datetime(2024, 1, 1, 8), dt.datetime(2024, 2, 29), None],
+    "full_name": ["Ann Lee Smith", "Bob", None], "country": ["GE", None, "AM"], "discount": [None, 0.1, 0.2],
+    "quantity": [1.0, None, 3.0], "acct": ["a1", "a2", "a1"], "amt": [1.0, 2.0, 3.0], "internal_note": ["x", "y", "z"],
+    "currency": ["GEL", "USD", "EUR"], "payload": ['{"user": {"id": 7, "country": "GE"}}', "{}", None],
+    "refunded": [False, True, None], "modified": [dt.datetime(2024, 1, 2), dt.datetime(2024, 1, 3), dt.datetime(2024, 1, 1)],
+    "rate": [1.0, 2.0, 0.5], "customer_id": ["c1", "c1", "c2"],
+    # the cheat sheet's columns
+    "price": [1.0, 2.0, 3.0], "tmp": [0, 0, 0], "old": [1, 2, 3], "x": [1, None, 3], "e": [" A ", "b", None],
+    "d": ["2024-01-02", "nope", None], "n": ["1.5", "x", None], "first": ["Ann", "Bob", None], "last": ["Lee", "Ray", "X"],
+    "s": ["A", "B", None], "a": [1, 2, 3], "b": ["x", "y", "z"],
+}
+
+
+@needs_frontend
+def test_the_polars_examples_and_cheat_sheet_run():
+    import polars as pl
+
+    tsx = (_FRONT / "PythonGuide.tsx").read_text(encoding="utf-8")
+    examples = _ts_strings(_block(tsx, "const POLARS_EXAMPLES"), r"code: `(.*?)`,\n  \}")
+    assert len(examples) >= 12
+    table = pl.DataFrame(_FIXTURE).to_arrow()
+    for code in examples:
+        out = apply_steps([_pl(code)], table)
+        assert out.num_rows >= 1, code
+    cheats = _ts_strings(_block(tsx, "const TO_POLARS"), r"\[\"[^\"]+\", `[^`]*`, `(.*?)`\]")
+    assert len(cheats) >= 20
+    for snippet in cheats:
+        df = pl.DataFrame(_FIXTURE)
+        ns = {"pl": pl, "df": df, "f": lambda row: str(row)}
+        code = snippet.split("  #")[0]
+        exec(code if code.startswith("df") else f"_r = df.select({code})", ns)  # noqa: S102 - our own guide's text
 
 
 # ---- through the pipelines API ------------------------------------------------------------------
