@@ -35,7 +35,7 @@ from ..models import Connection, Job, JobSplit, Watermark, utcnow
 from ..connectors import category_of
 from ..connectors.base import UserFacingError
 from ..services import build_connector
-from . import joblog
+from . import chpull, joblog
 from .drivers import CapabilityError, Choice, DriverRefused, TargetCtx, choose
 from .adapters import PartialWrite, get_adapter
 from .arrowconv import _jsonable
@@ -236,6 +236,8 @@ class Prepared:
     steps: list[Step] = field(default_factory=list)
     remote: Any = None  # remote.RemoteCtx of a load job reading downloaded remote files
     drivers: dict[str, Choice] = field(default_factory=dict)  # side -> the driver option chosen (engine/drivers.py)
+    method: dict[str, Any] | None = None  # the transfer-method choice (chpull.assess); None: only through Conduit
+    pull: Any = None  # chpull.Pull when ClickHouse pulls the source itself
 
     @property
     def opts(self):
@@ -423,9 +425,23 @@ def prepare(spec: JobIn, session: Session, job_id: uuid.UUID | None = None) -> P
         tgt.prepare_target(t.table, tgt_cols, t.mode, t.keys, TargetOptions(order_by=t.order_by, partition_by=t.partition_by, ddl=custom_ddl(t)), t.create, False)
     except ValueError as e:
         raise JobError(str(e)) from e
-    drivers = choose_drivers(spec, src, sconn, tgt, tconn, req, TargetCtx(t.table, tgt_cols, t.mode, t.keys, bool(existing)), notes)
+    method = chpull.assess(spec, src, sconn, tgt, out, req, bool(existing))
+    pull = None
+    if o.transfer_method == chpull.METHOD:
+        if method is None:
+            raise JobError("ClickHouse can pull directly only from a PostgreSQL or MySQL table into a ClickHouse table")
+        if not method["eligible"]:
+            raise JobError(f"ClickHouse can't pull this directly: {method['why']}")
+        pull = chpull.prepare_pull(spec, src, sconn, tgt, out, req)
+        method["used"] = chpull.METHOD
+        notes.append(f"ClickHouse pulls the rows itself through the named collection `{pull.collection}`: no row passes "
+                     "through Conduit, and there is no reject file")
+        drivers: dict[str, Choice] = {}
+    else:
+        drivers = choose_drivers(spec, src, sconn, tgt, tconn, req, TargetCtx(t.table, tgt_cols, t.mode, t.keys, bool(existing)), notes)
     return Prepared(spec, src, tgt, req, out, Transformer(read_cols_sel, out), tgt_cols, bool(existing), unique,
-                    split_logical, src_key, tgt_key, notes, steps=compile_steps(spec.steps), remote=rctx, drivers=drivers)
+                    split_logical, src_key, tgt_key, notes, steps=compile_steps(spec.steps), remote=rctx, drivers=drivers,
+                    method=method, pull=pull)
 
 
 def choose_drivers(spec: JobIn, src: Any, sconn: Connection | None, tgt: Any, tconn: Connection, req: ReadRequest,
@@ -530,12 +546,13 @@ def layout(prep: Prepared, *, execute_target: bool) -> Layout:
     if len(splits) > 1 and not is_file_source(prep.src):
         warnings.append("Each split reads its own snapshot, so rows changing while the job runs can be missed or read twice "
                         "across split borders.")
-    if splits and splits[0].resumable and splits[0].kind != "file" and not prep.unique_split and t.mode != "upsert":
+    if (splits and splits[0].resumable and splits[0].kind != "file" and not prep.unique_split and t.mode != "upsert"
+            and prep.pull is None):  # a pulled split always restarts cleanly (its staging table is dropped)
         warnings.append(f"{prep.req.split_col} is not unique, so a split that fails midway cannot safely resume: it restarts "
                         "(append/replace) only if nothing was written yet.")
     if not prep.req.split_col and not is_file_source(prep.src):
         prep.notes.append("No split column chosen: the table is read in one piece. Pick one to run in parallel.")
-    if prep.tgt.max_writers < workers:
+    if prep.tgt.max_writers < workers and prep.pull is None:
         prep.notes.append(f"{prep.tgt.dialect} allows {prep.tgt.max_writers} writer at a time: reads run in parallel, writes take turns.")
     notes = prep.notes + getattr(prep.src, "notes", []) + getattr(prep.tgt, "notes", [])
     return Layout(total, exact, splits, workers, list(dict.fromkeys(notes)), warnings, ddl)
@@ -557,8 +574,18 @@ def make_plan(prep: Prepared, *, sample_rows: int = 2000) -> dict[str, Any]:
         "splits": [{"idx": s.idx, "label": s.label, "est_rows": s.est_rows, "kind": s.kind} for s in lay.splits],
         "notes": lay.notes, "warnings": lay.warnings, "sample": None,
         "drivers": {k: v.public() for k, v in prep.drivers.items()},
+        "transfer_method": prep.method,
     }
-    if sample_rows and lay.splits:
+    if sample_rows and lay.splits and prep.pull is not None:  # the sample is what ClickHouse itself reads and casts
+        t0 = time.perf_counter()
+        table = chpull.sample(prep, lay.splits[0], min(sample_rows, 2000), prep.src)
+        secs = max(time.perf_counter() - t0, 1e-6)
+        plan["sample"] = {
+            "rows": table.num_rows, "seconds": round(secs, 3), "rows_per_s": round(table.num_rows / secs), "rejected": 0,
+            "reject_examples": [], "preview": _rows_json(table, 20), "est_duration_s": None,
+            "basis": "ClickHouse reading a sample through the named collection; the real speed is measured while running",
+        }
+    elif sample_rows and lay.splits:
         t0 = time.perf_counter()
         gen = prep.src.read_batches(prep.req, lay.splits[0], sample_rows)
         first = None
@@ -731,7 +758,10 @@ def _run_split(ctx: Ctx, idx: int) -> None:
         attempts += 1
         _bump(ctx.job_id, idx, attempts=attempts)
         try:
-            _process_split(ctx, idx, spec, resume, switched)
+            if prep.pull is not None:
+                chpull.run_split(ctx, idx, spec)
+            else:
+                _process_split(ctx, idx, spec, resume, switched)
             _bump(ctx.job_id, idx, status="done", finished_at=utcnow())
             joblog.push(ctx.job_id, "info", f"{tag} finished")
             rc = prep.remote
@@ -751,7 +781,8 @@ def _run_split(ctx: Ctx, idx: int) -> None:
                 resume, rows_before = dec(cur.resume), cur.rows_written
             can_resume = spec.resumable and resume is not None and (
                 spec.kind == "file" or prep.unique_split or prep.spec.target.mode == "upsert")
-            safe = rows_before == 0 or prep.spec.target.mode == "upsert" or can_resume
+            # a pulled split is always safe to redo: nothing reaches the target before its staged rows are complete
+            safe = rows_before == 0 or prep.spec.target.mode == "upsert" or can_resume or prep.pull is not None
             ch = prep.drivers.get(e.side) if isinstance(e, CapabilityError) else None
             if ch is not None and not ch.explicit and ch.used != ch.classic and e.side not in switched and safe:
                 switched[e.side] = ch.classic  # auto chose a fast driver that can't do this: the classic one can
@@ -916,6 +947,7 @@ def _run_job(job_id: uuid.UUID | str) -> str:
                         "target_exists": prep.target_exists, "ddl": lay.ddl, "split_column": prep.req.split_col,
                         "notes": lay.notes, "warnings": lay.warnings,
                         "drivers": {k: v.public() for k, v in prep.drivers.items()},
+                        "transfer_method": prep.method,
                     }
                     job.rows_total, job.rows_total_exact, job.splits_total, job.workers = lay.total, lay.exact, len(lay.splits), lay.workers
                     for sp in lay.splits:
@@ -925,6 +957,8 @@ def _run_job(job_id: uuid.UUID | str) -> str:
                     joblog.push(jid, "info", f"{len(lay.splits)} splits on {prep.req.split_col or 'the whole source'}, {lay.workers} workers")
                     for side, ch in prep.drivers.items():
                         joblog.push(jid, "info", f"{side} driver: {ch.label}" + (f" ({ch.why})" if ch.why else ""))
+                    if prep.pull is not None:
+                        joblog.push(jid, "info", f"transfer method: ClickHouse pulls directly through `{prep.pull.collection}`")
                     s.commit()
         except Exception as e:  # noqa: BLE001
             from ..remote import NothingToLoad

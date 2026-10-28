@@ -22,6 +22,7 @@ class MySQLConnector(Connector):
                      "which needs local_infile=ON on the server.", module="connectorx"),
         DriverOption("pymysql", "PyMySQL (classic)", "Rows through Python: every type, slower.", classic=True),
     )
+    ch_pull = True
 
     def cx_uri(self) -> str | None:
         """The connection as a connectorx URI, or None when it uses TLS (connectorx can't take these settings)."""

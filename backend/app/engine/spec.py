@@ -204,6 +204,8 @@ class OptionsIn(BaseModel):
     # driver option per side for this run (engine/drivers.py); None: the connection's own setting
     source_driver: str | None = Field(None, max_length=20)
     target_driver: str | None = Field(None, max_length=20)
+    # how rows move: through Conduit (None / "conduit"), or ClickHouse reads the source itself (engine/chpull.py)
+    transfer_method: Literal["conduit", "clickhouse_pull"] | None = None
 
     @field_validator("timezone")
     @classmethod

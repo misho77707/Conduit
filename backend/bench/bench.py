@@ -9,7 +9,9 @@ that reaches them, e.g. the throwaway servers README "Performance" describes:
 
 Sources are generated once per server (bench tables, about 2M rows: ids, timestamps with and without time
 zone, numeric, double, integers with nulls, text of varied length, booleans, json, a low-cardinality text);
-`--regen` rebuilds them. Each run loads one source into one target (replace mode) and reports rows/s and this
+`--regen` rebuilds them. `--drivers "method=clickhouse_pull"` runs the ClickHouse direct pull: give the named
+collections a ClickHouse admin made for the sources with `--collections pg=bench_pg,my=bench_my`, and leave out
+the double column MySQL can't be pulled with (`--drop-cols score`; then every run of that call leaves it out). Each run loads one source into one target (replace mode) and reports rows/s and this
 process's CPU% (100 = one core busy; a GIL-bound job stays near 100 whatever the worker count).
 """
 from __future__ import annotations
@@ -189,7 +191,7 @@ class Run:
     split: bool
     source_driver: str | None = None
     target_driver: str | None = None
-    method: str | None = None  # a transfer method other than "through Conduit" (later: ClickHouse pulls directly)
+    method: str | None = None  # a transfer method other than "through Conduit": clickhouse_pull
     rows: int = 0
     seconds: float = 0.0
     rows_s: float = 0.0
@@ -231,7 +233,7 @@ class CpuSampler:
         self.peak = max(self.samples, default=self.avg)
 
 
-def run_one(client, auth, conns: dict, r: Run, timeout: float) -> Run:
+def run_one(client, auth, conns: dict, r: Run, timeout: float, columns: dict | None = None) -> Run:
     options = {"workers": r.workers, "split_column": "id" if r.split else None}
     if r.source_driver:
         options["source_driver"] = r.source_driver
@@ -243,6 +245,8 @@ def run_one(client, auth, conns: dict, r: Run, timeout: float) -> Run:
             "source": {"connection_id": conns[("src", r.src)], "table": SRC_TABLE[r.src]},
             "target": {"connection_id": conns[("tgt", r.tgt)], "table": tgt_table(r.tgt, r.src), "mode": "replace", "create": True},
             "options": options}
+    if columns and columns.get(r.src):
+        body["columns"] = [{"source": c} for c in columns[r.src]]
     with CpuSampler() as cpu:
         res = client.post("/api/jobs", json=body, headers=auth)
         if res.status_code >= 300:
@@ -294,6 +298,8 @@ def main() -> None:
     ap.add_argument("--regen", action="store_true", help="rebuild the sources even if they exist")
     ap.add_argument("--label", default="run", help="results go to bench/results/<label>.jsonl")
     ap.add_argument("--timeout", type=float, default=1800)
+    ap.add_argument("--collections", default="", help="ClickHouse named collections per source kind, e.g. pg=bench_pg,my=bench_my")
+    ap.add_argument("--drop-cols", default="", help="comma list of source columns every run leaves out")
     args = ap.parse_args()
 
     servers = {k: {"host": v.split(":")[0], "port": int(v.split(":")[1])} for k, v in (("pg", args.pg), ("my", args.my), ("ch", args.ch))}
@@ -342,11 +348,21 @@ def main() -> None:
                 ext = "sqlite" if kind == "sqlite" else "duckdb"
                 body = {"type": kind, "config": {"path": str(data / f"{'src' if role == 'src' else 'tgt'}.{ext}"),
                                                  "create_if_missing": True}, "secrets": {}}
+            if role == "src" and kind in colls:
+                body["config"]["ch_collection"] = colls[kind]
             res = client.post("/api/connections", json={"name": f"{role}-{kind}", **body}, headers=auth)
             assert res.status_code == 201, res.text
             return res.json()["id"]
 
+        colls = dict(kv.split("=") for kv in filter(None, args.collections.split(",")))
         conns = {("src", k): conn("src", k) for k in dict.fromkeys(sources)}
+        drop = set(filter(None, args.drop_cols.split(",")))
+        columns = None
+        if drop:
+            columns = {}
+            for k in dict.fromkeys(sources):
+                info = client.get(f"/api/connections/{conns[('src', k)]}/tables/{SRC_TABLE[k]}/inspect", headers=auth).json()
+                columns[k] = [c["name"] for c in info["columns"] if c["name"] not in drop]
         conns.update({("tgt", k): conn("tgt", k) for k in dict.fromkeys(targets)})
         combos: list[dict] = [{}]
         if args.drivers:
@@ -365,7 +381,7 @@ def main() -> None:
                         # "pg=adbc" applies to whichever side is Postgres; "src.pg=..." / "tgt.pg=..." to one side only
                         r = Run(s, t, w, split, source_driver=combo.get(f"src.{s}", combo.get(s)),
                                 target_driver=combo.get(f"tgt.{t}", combo.get(t)), method=combo.get("method"))
-                        r = run_one(client, auth, conns, r, args.timeout)
+                        r = run_one(client, auth, conns, r, args.timeout, columns)
                         results.append(r)
                         with results_path.open("a", encoding="utf-8") as f:
                             f.write(json.dumps(asdict(r)) + "\n")

@@ -24,9 +24,9 @@ from ..arrowconv import dedupe_last, from_driver, last_value, rows_to_table_leni
 from ..ddl import TargetOptions, create_table_sql, qi, qualified, split_name
 from ..drivers import CapabilityError
 from ..model import Batch, ReadRequest, SplitSpec
-from ..types import ColSpec, normalize, to_arrow
+from ..types import ColSpec, clean, normalize, to_arrow
 from .base import (
-    Adapter, SqlDialect, Writer, build_count_sql, build_minmax_sql, build_probe_sql, build_read_sql,
+    Adapter, SqlDialect, Writer, build_count_sql, build_minmax_sql, build_probe_sql, build_read_sql, is_utc,
 )
 
 _UTC = dt.timezone.utc
@@ -240,6 +240,40 @@ class MySQLAdapter(Adapter):
             if type(e).__name__ == "PanicException" or "not implemented" in str(e).lower():
                 raise CapabilityError("source", f"connectorx: {' '.join(str(e).split())[:300]}") from e
             raise
+
+    # ---- ClickHouse direct pull --------------------------------------------------
+    ch_function = "mysql"
+    ch_limit_pushdown = False  # ClickHouse sends the SELECT without its LIMIT and reads until it has enough
+    ch_settings = {"mysql_datatypes_support_level": "decimal,datetime64"}  # else DECIMAL is text, DATETIME(6) seconds
+
+    def ch_table_args(self, table: str) -> dict[str, str]:
+        schema, name = self._schema(table)
+        return {"database": schema or str(self.c.config.get("database") or ""), "table": name}
+
+    def ch_pull_problem(self, req: ReadRequest) -> str | None:
+        floats = next((c.name for c in req.columns if clean(c.logical) in ("FLOAT", "DOUBLE")), None)
+        if floats:  # ClickHouse 24.8's MySQL reader parses MySQL's text form itself (precise_float_parsing doesn't reach it)
+            return (f"column `{floats}` is a floating-point column, which ClickHouse's MySQL reader can get one unit off "
+                    "in the last digit (0.375 arrives as 0.37500000000000006)")
+        schema, name = self._schema(req.table or "")
+        stamps = {r[0] for r in self._rows("select column_name from information_schema.columns where table_schema = "
+                                           "COALESCE(%s, DATABASE()) and table_name = %s and data_type = 'timestamp'",
+                                           [schema, name])}
+        hit = next((c.name for c in req.columns if c.name in stamps), None)
+        if hit is None:
+            return None
+        # TIMESTAMP arrives in the session's zone and ClickHouse can't set it; Conduit's sessions use UTC (_INIT).
+        conn = self.c._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT @@session.time_zone, @@system_time_zone")
+                zone, system = cur.fetchone()
+        finally:
+            conn.close()
+        zone = system if str(zone).upper() == "SYSTEM" else zone
+        if not is_utc(zone):
+            return f"column `{hit}` is TIMESTAMP and the server's time zone is {zone}: ClickHouse would read its local times as UTC"
+        return None
 
     # ---- schema ------------------------------------------------------------------
     def table_columns(self, table: str) -> list[ColSpec]:

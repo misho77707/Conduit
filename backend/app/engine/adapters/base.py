@@ -197,6 +197,15 @@ def range_label(col: str, lo: Any, hi: Any) -> str:
     return f"{col} {f(lo) if lo is not None else '…'} … {f(hi) if hi is not None else '…'}"
 
 
+_UTC_NAMES = {"utc", "etc/utc", "uct", "etc/uct", "gmt", "etc/gmt", "gmt0", "etc/gmt0", "etc/gmt+0", "etc/gmt-0",
+              "universal", "etc/universal", "zulu", "etc/zulu", "greenwich", "etc/greenwich", "+00:00", "-00:00", "z"}
+
+
+def is_utc(zone: str | None) -> bool:
+    """A server time zone setting that is UTC all year round."""
+    return str(zone or "").strip().lower() in _UTC_NAMES
+
+
 class Adapter(ABC):
     dialect: str
     max_writers: int = 16  # concurrent writers the target tolerates (SQLite/DuckDB: 1)
@@ -246,6 +255,23 @@ class Adapter(ABC):
         other = copy.copy(self)
         other._settled = {**self._settled, side: driver}
         return other
+
+    # ---- ClickHouse direct pull (engine/chpull.py) -------------------------------
+    ch_function: str | None = None  # the ClickHouse table function that reads this database (None: no direct pull)
+    ch_limit_pushdown: bool = True  # ClickHouse passes LIMIT on to it (MySQL: no, so test reads narrow on a key)
+    ch_settings: dict[str, Any] = {}  # query settings every pull from this database needs
+
+    def ch_table_args(self, table: str) -> dict[str, str]:
+        """Table-function arguments naming `table` (besides the named collection)."""
+        raise NotImplementedError
+
+    def ch_pull_problem(self, req: ReadRequest) -> str | None:
+        """Why ClickHouse reading these columns itself would give other values than Conduit does, else None."""
+        return None
+
+    def ch_expr(self, col: ColSpec, ident: str) -> str | None:
+        """ClickHouse expression over the table function's column `ident` when its value needs converting first."""
+        return None
 
     # ---- schema ----------------------------------------------------------------
     @abstractmethod

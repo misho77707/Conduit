@@ -19,6 +19,7 @@ class PostgresConnector(Connector):
                      module="adbc_driver_postgresql"),
         DriverOption("psycopg", "psycopg (classic)", "Rows through Python: every type, slower.", classic=True),
     )
+    ch_pull = True
 
     def _connect(self) -> psycopg.Connection:
         return psycopg.connect(**self.conn_kwargs(), autocommit=True)

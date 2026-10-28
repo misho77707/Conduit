@@ -132,6 +132,7 @@ export interface DbTypeOut {
   default_port: number | null; description: string; secret_fields: string[];
   category: ConnectionCategory; // storage = S3 / SFTP / HTTP: files, never tables
   drivers: DriverOption[]; // fastest first; empty: one driver only, nothing to choose
+  ch_pull: boolean; // ClickHouse can pull its tables directly (config ch_collection / ch_address)
 }
 
 export interface ConnectionOut {
@@ -313,7 +314,9 @@ export interface OptionsIn {
   hi?: string | number | null; timezone: string; workers: number; splits?: number | null; split_rows?: number | null;
   read_chunk: number; write_batch: number; max_rejects: number; retries: number;
   source_driver?: string | null; target_driver?: string | null; // null: each connection's own driver setting
+  transfer_method?: TransferMethod | null; // null: through Conduit
 }
+export type TransferMethod = "conduit" | "clickhouse_pull";
 export interface JobIn {
   name?: string | null; source: SourceIn; target: TargetIn; columns?: ColumnMapIn[] | null; options: OptionsIn;
 }
@@ -331,6 +334,11 @@ export interface JobPlan {
   splits: { idx: number; label: string; est_rows: number | null; kind: string }[];
   notes: string[]; warnings: string[]; sample: JobPlanSample | null;
   drivers?: { source?: DriverChoice; target?: DriverChoice }; // only for databases with a driver choice
+  transfer_method?: TransferMethodInfo | null; // null: rows can only move through Conduit
+}
+/** Whether ClickHouse can pull this job's source directly (backend engine/chpull.assess). */
+export interface TransferMethodInfo {
+  used: TransferMethod; eligible: boolean; why: string | null; collection: string | null; limits: string[];
 }
 /** The driver a job side uses (backend engine/drivers.Choice.public). */
 export interface DriverChoice { requested: string; used: string; label: string; explicit: boolean; why: string | null; }

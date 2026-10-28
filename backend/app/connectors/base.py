@@ -7,6 +7,7 @@ one interface: reader -> (transforms) -> writer.
 """
 from __future__ import annotations
 
+import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
@@ -146,6 +147,24 @@ class NotADatabase(UserFacingError, ValueError):
     """A file-storage connection was used where a database is needed."""
 
 
+_COLLECTION = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+_ADDRESS = re.compile(r"^(?:[A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\])(?::\d{1,5})?$")
+
+
+def pull_field_errors(config: dict[str, Any]) -> list[str]:
+    """The ClickHouse direct-pull fields of a PostgreSQL / MySQL connection (both optional, neither secret)."""
+    errors = []
+    coll = str(config.get("ch_collection") or "").strip()
+    addr = str(config.get("ch_address") or "").strip()
+    if coll and not _COLLECTION.match(coll):
+        errors.append("ClickHouse named collection: a plain name (letters, digits, underscore)")
+    if addr and not _ADDRESS.match(addr):
+        errors.append("Address as ClickHouse sees it: host or host:port")
+    if addr and not coll:
+        errors.append("Address as ClickHouse sees it needs a ClickHouse named collection")
+    return errors
+
+
 def _slow_ms() -> int:
     """A handshake slower than this is reported as "degraded" (a runtime setting, imported late so connectors load
     without the app's models)."""
@@ -165,6 +184,9 @@ class Connector(ABC):
     secret_fields: ClassVar[tuple[str, ...]] = ("password",)
     # Driver options, fastest first, the classic one last (empty: one driver only, nothing to choose).
     drivers: ClassVar[tuple[DriverOption, ...]] = ()
+    # ClickHouse can read this database's tables itself (engine/chpull.py) through a named collection a ClickHouse
+    # admin created: config `ch_collection` holds its name, `ch_address` optionally the host:port ClickHouse uses.
+    ch_pull: ClassVar[bool] = False
 
     def __init__(self, config: dict[str, Any], secrets: dict[str, Any], timeout: int = 8):
         self.config = config
@@ -182,6 +204,8 @@ class Connector(ABC):
         errors: list[str] = []
         if cls.kind == "host" and not str(config.get("host", "")).strip():
             errors.append("Host is required")
+        if cls.ch_pull:
+            errors += pull_field_errors(config)
         return errors
 
     def display_host(self) -> str:
@@ -224,5 +248,5 @@ class Connector(ABC):
             "type": cls.type, "label": cls.label, "abbr": cls.abbr, "kind": cls.kind,
             "default_port": cls.default_port, "description": cls.description,
             "secret_fields": list(cls.secret_fields), "category": cls.category,
-            "drivers": [d.public() for d in cls.drivers],
+            "drivers": [d.public() for d in cls.drivers], "ch_pull": cls.ch_pull,
         }

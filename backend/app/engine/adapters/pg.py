@@ -24,7 +24,7 @@ from ..model import Batch, ReadRequest, SplitSpec
 from ..types import ColSpec, clean, normalize, to_arrow
 from .base import (
     Adapter, SqlDialect, Writer, build_count_sql, build_minmax_sql, build_probe_sql, build_read_sql, equal_bounds,
-    source_sql,
+    is_utc, source_sql,
 )
 
 _OID_TYPES = {
@@ -169,6 +169,29 @@ class PostgresAdapter(Adapter):
 
     def server_version(self) -> int:
         return int(self._rows("SHOW server_version_num")[0][0])
+
+    # ---- ClickHouse direct pull --------------------------------------------------
+    ch_function = "postgresql"
+
+    def ch_table_args(self, table: str) -> dict[str, str]:
+        schema, name = split_name(table)
+        return {"schema": schema or "public", "table": name}
+
+    def ch_pull_problem(self, req: ReadRequest) -> str | None:
+        tz_cols = [c.name for c in req.columns if clean(c.logical) == "TIMESTAMPTZ"]
+        if tz_cols:
+            # ClickHouse reads timestamptz as text in the session's zone and drops the offset; it can't set the zone.
+            # (Read on Conduit's own session: the collection's user is assumed to get the same server default.)
+            zone = self._rows("SHOW timezone")[0][0]
+            if not is_utc(zone):
+                return (f"column `{tz_cols[0]}` is timestamptz and the server's time zone is {zone}: ClickHouse would read "
+                        "its local times as UTC")
+        return None
+
+    def ch_expr(self, col: ColSpec, ident: str) -> str | None:
+        if clean(col.logical) == "BLOB":
+            return f"unhex(substring({ident}, 3))"  # bytea arrives as its hex text, '\\x…'
+        return None
 
     # ---- schema ------------------------------------------------------------------
     def table_columns(self, table: str) -> list[ColSpec]:
