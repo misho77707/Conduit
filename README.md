@@ -297,6 +297,8 @@ the splits, a row estimate and a timed sample of the read/write speed.
 | `read_chunk` | rows fetched per round trip |
 | `write_batch` | rows per insert and commit |
 | `max_rejects`, `retries` | stop after N bad rows (-1 = never); attempts per split, with backoff |
+| `source_driver`, `target_driver` | this run's driver for one side (`auto` or an option id, see Performance); empty = the connection's own setting |
+| `transfer_method` | `conduit` (default) or `clickhouse_pull`: ClickHouse reads the source itself (see Performance) |
 
 Target `mode`: `append`, `replace` (truncates first) or `upsert` (needs `keys`).
 
@@ -319,13 +321,141 @@ silence: press retry. A redelivered task never runs a job twice (heartbeat guard
   at split borders.
 - Replace empties the target first; it stays incomplete until the job finishes.
 - ClickHouse: naive `DateTime` values move as UTC instants; upsert creates a ReplacingMergeTree (read with
-  `FINAL`); large targets get a monthly partition suggestion. MySQL/MariaDB writes are pure-Python
-  (about 26k rows/s per writer when measured), so raise `workers`. SQLite and DuckDB accept one writer at a time.
+  `FINAL`); large targets get a monthly partition suggestion. MySQL/MariaDB writes through PyMySQL are
+  pure-Python (about 26k rows/s per writer when measured); the fast driver's LOAD DATA is roughly twice that
+  (see Performance). SQLite and DuckDB accept one writer at a time.
 - MongoDB: `_id` ObjectIds become strings on the way out; append is at-least-once, upsert is by key.
 - Excel: `.xlsx` only (`.xls` is refused with a message). Avro/ORC and watched folders are not built yet.
 - Files (local or remote) are one split each and resume by **row offset**: a Retry continues a half-loaded
   file after its last committed batch instead of starting it over. Rows the reader rejected count as read, so
   they are not retried (they are in the reject file).
+
+## Performance
+
+Two ways to move rows faster: a faster **driver** for a database's side of a job (rows still pass through
+Conduit, as Arrow batches instead of Python rows), and, into ClickHouse, letting **ClickHouse pull** the source
+itself.
+
+### Drivers
+
+| Database | Fast option | Classic option | What makes a job side use classic |
+|---|---|---|---|
+| PostgreSQL | `adbc`: ADBC over binary COPY, reads and writes | `psycopg` | source columns of other types than int2/4/8, float4/8, numeric, bool, text, varchar, char, date, timestamp(tz), bytea, json(b), uuid and enums (arrays, interval, inet, money, time …) |
+| MySQL / MariaDB | `fast`: connectorx reads, LOAD DATA LOCAL INFILE writes | `pymysql` | reads: TLS connections, custom SQL, TIME / BIT / spatial columns, DECIMAL with more than 10 decimals; writes: `local_infile` OFF on the server |
+
+ClickHouse, SQLite, DuckDB and MongoDB have one driver each (ClickHouse and DuckDB already move Arrow).
+
+- **Where it is set.** Each PostgreSQL / MySQL connection has a *Driver* (add / edit dialog): **Automatic** (new
+  connections) or one option. Connections that existed before drivers did were set to the classic one. A job
+  can override either side (`options.source_driver` / `target_driver`; the wizard's review step, a pipeline's
+  Load panel). Previews, table inspection, Compare and health checks use the connection's setting.
+- **Automatic** picks the fast option when its checks pass for that job side, else the classic one, and the
+  plan, the job log and the job page say exactly why (`source: using psycopg (classic) — column tags is text[]
+  …`). **An explicit option never falls back**: a job it can't run is refused at plan time (422) with the reason.
+- **Mid-run**, a fast driver that meets something its checks couldn't see (a MySQL zero date, say) stops; under
+  Automatic, that split is redone on the classic driver, but only when that cannot duplicate rows (nothing written
+  yet, an upsert, or a split that resumes exactly). Explicit choices fail the split instead.
+- **Same values either way.** A fast driver's batches are made identical to the classic path's
+  (`arrowconv.from_driver`: same types, same JSON text, same rejects); `tests/test_drivers_*.py` load every
+  driver pair in append / replace / upsert into identical targets. Rejects still bisect to the bad rows; LOAD DATA
+  only warns on bad values, so any warning rolls its batch back to be bisected.
+- **Health checks** also open the fast driver: if it can't connect, the connection shows a note ("ADBC … can't
+  connect (…); jobs use psycopg (classic)").
+
+### ClickHouse pulls directly
+
+For a PostgreSQL or MySQL **table** loaded into **ClickHouse**, *Transfer method → ClickHouse pulls directly*
+(`options.transfer_method = "clickhouse_pull"`) has ClickHouse read the source itself: no row passes through
+Conduit, which only coordinates.
+
+**Credentials: a named collection, created by a ClickHouse admin.** Conduit never puts the source password in a
+query and never creates a collection. On ClickHouse 24.8, `CREATE NAMED COLLECTION` is written to
+`system.query_log` with the password in plain text (checked on a real server, and asserted by
+`tests/test_chpull.py`); a query that only names a collection is not. The admin runs, once:
+
+```sql
+CREATE NAMED COLLECTION pg_prod AS host = 'db.internal', port = 5432, user = 'reader', password = '…', database = 'app';
+GRANT NAMED COLLECTION ON pg_prod TO conduit_user;   -- the user of Conduit's ClickHouse connection
+```
+
+(or the same in the server's XML config), and the source connection gets *ClickHouse named collection for
+direct pulls* = `pg_prod`. *Address as ClickHouse sees it* (optional `host` or `host:port`) overrides the
+collection's address, for when ClickHouse reaches the database by another name than Conduit does.
+
+**Checks at plan time.** ClickHouse describes the table through the collection and reads one row through it, so a
+wrong name, a missing grant or an unreachable host is a 422 with ClickHouse's own message. The review shows the
+choice only when the target is ClickHouse and the source a PostgreSQL / MySQL connection, and says why when the
+pull can't be used:
+
+- custom SQL, a WHERE filter (it is written in the source's SQL), date formats on columns, pipeline steps, ctid splits;
+- array columns; MySQL FLOAT / DOUBLE columns (ClickHouse 24.8's MySQL reader gets some one unit off in the last
+  digit: 0.375 arrives as 0.37500000000000006); `timestamptz` / MySQL `TIMESTAMP` columns when the source server's
+  time zone isn't UTC (ClickHouse reads their local text as UTC);
+- a target that isn't a non-replicated MergeTree-family table (an existing one, or one from custom DDL).
+
+**How it runs.** Per split, `INSERT INTO <staging> SELECT CAST(…) FROM postgresql(pg_prod, schema = …, table = …)
+WHERE <split range>` (the range is pushed down to the source), into a staging table made with `CREATE TABLE …
+AS <target>`, then `MOVE PARTITION … TO TABLE <target>` for each of its partitions. A split that fails while
+pulling drops its staging table and pulls again; one that fails while moving continues the move (a moved
+partition leaves staging, so nothing moves twice). Progress comes from `system.processes` (it advances one read
+block, about 65,000 rows, at a time), Cancel is `KILL QUERY`. Staging tables are named
+`conduit_pull_<job>_<split>`; one is left behind only when a move failed, for its Retry.
+
+**Limits.** No reject file: a value the target refuses fails its split. Values follow ClickHouse's `postgresql()` /
+`mysql()` type mapping, then a `CAST` to each target column's type (JSON is written as the source prints it). A NULL
+headed for a non-Nullable column fails the split instead of becoming a reject.
+
+### Measured
+
+`backend/bench/bench.py` (not part of `pytest`) runs the real engine against real servers: 2,000,000 rows of ids,
+timestamps with and without time zone, numeric, double, integers with nulls, text, booleans, JSON and a
+low-cardinality text column. Throwaway servers (PostgreSQL 16, MySQL 8.4, ClickHouse 24.8) on one Docker network:
+
+```bash
+docker run --rm --network conduit-bench -v "$PWD/backend:/work" -w /work conduit-test \
+  python bench/bench.py --sources pg,my --targets pg,my,ch,duckdb --variants nosplit:1,split:4 \
+  --drivers "pg=psycopg,my=pymysql;pg=adbc,my=fast" --label after
+```
+
+Rows per second, classic and fast measured in the same session (Docker Desktop on Windows, 20 vCPUs; the
+machine's speed drifted by about 20 % between sessions, so compare within a row):
+
+| Source → target | classic, 1 worker | fast, 1 worker | classic, 4 splits | fast, 4 splits |
+|---|---|---|---|---|
+| PostgreSQL → PostgreSQL | 25k | 123k | 39k | 109k |
+| PostgreSQL → ClickHouse | 63k | 366k | 66k | 354k |
+| PostgreSQL → DuckDB | 49k | 108k | 51k | 61k |
+| PostgreSQL → MySQL | 20k | 53k | 25k | 41k |
+| MySQL → PostgreSQL | 50k | 221k | 42k | 111k |
+| MySQL → ClickHouse | 75k | 386k | 65k | 264k |
+| MySQL → DuckDB | 64k | 78k | 55k | 69k |
+| MySQL → MySQL | 29k | 48k | 28k | 52k |
+| ClickHouse → PostgreSQL | 81k | 202k | 95k | 322k |
+| ClickHouse → MySQL | 32k | 76k | 45k | 52k |
+| DuckDB → PostgreSQL | 95k | 245k | 94k | 261k |
+| DuckDB → MySQL | 30k | 73k | 45k | 25k |
+
+ClickHouse pulling directly, same session as its own fast-driver comparison (MySQL without its DOUBLE column):
+
+| Source → ClickHouse | fast driver, 1 / 4 / 8 workers | ClickHouse pull, 1 / 4 / 8 splits | Conduit CPU, pull |
+|---|---|---|---|
+| PostgreSQL | 487k / 462k / 491k | 392k / 514k / 531k | 8–41 % |
+| MySQL | 391k / 255k / 165k | 327k / 220k / 285k | 6–26 % |
+
+- **The GIL.** On the classic drivers a job's process stays near 100 % CPU (one core) whatever the worker count:
+  rows are built in Python. Fast drivers decode and encode in C / Rust outside the GIL, so a job uses several
+  cores (PostgreSQL → ClickHouse over ADBC with 4 splits: 266 %) and finishes far sooner. What remains Python
+  per batch is small; jobs still run as threads of one process.
+- **MySQL targets:** LOAD DATA is roughly twice PyMySQL's speed per writer, but parallel loads into one InnoDB
+  table contend: keep MySQL targets at 1–2 workers.
+- **DuckDB / SQLite targets** take one writer at a time; SQLite files on a Windows bind mount (`./data`) are
+  bound by that mount's I/O, not by Conduit.
+- **Tried and dropped:** mysqlclient (2.4× PyMySQL's reads but no faster writes, and connectorx reads faster
+  still); HTTP compression to ClickHouse (no gain on a local network); ADBC for SQLite (fast on a container's
+  own disk, but SQLite files live on the `./data` bind mount, where the I/O is the limit); connectorx for
+  PostgreSQL (fast reads, but no writes: ADBC does both).
+- **Image size.** The backend image grows from 990 MB to 1.53 GB: connectorx about 197 MB, Polars (for Python
+  steps) about 180 MB, ADBC about 27 MB.
 
 ## Monitor
 
@@ -386,7 +516,7 @@ remembers the recipe and the schema it last produced, and points at its most rec
 run once per batch, in order, over the same Arrow batches the load engine already streams — there's no
 separate pipeline execution engine. Every visual step compiles to one generated SQL statement run in an
 in-process DuckDB; a `sql` step is your own statement; a `python` step execs a `def transform(df): ...`
-against a pandas DataFrame.
+against a pandas or a Polars DataFrame (see Python steps below).
 
 | `kind` | `config` | Does |
 |---|---|---|
@@ -396,7 +526,25 @@ against a pandas DataFrame.
 | `derive` | `{"column": "name", "expr": "..."}` | add one computed column |
 | `split` | `{"column": "c", "into": [{"name": "n", "expr": "..."}], "drop_source": false}` | add one or more columns computed from an existing one (e.g. `posted_at` → `posted_date`) |
 | `sql` | `{"sql": "SELECT ... FROM {{ input }} ..."}` | your own DuckDB SQL over the previous step's output |
-| `python` | `{"code": "def transform(df):\n    ...\n    return df"}` | your own pandas function over the previous step's output |
+| `python` | `{"engine": "polars", "code": "def transform(df):\n    ...\n    return df"}` | your own pandas or Polars function over the previous step's output |
+
+**Python steps: pandas or Polars.** `config.engine` is `"pandas"` or `"polars"`; a step without it (every step
+saved before Polars was added) is pandas, and anything else is refused (422). New steps start on Polars.
+- **pandas**: `df` is a pandas DataFrame, `pd` and `np` are pre-imported, `transform` returns a DataFrame.
+  The batch goes Arrow → pandas → Arrow, so pandas' own type rules apply (an integer column with nulls
+  becomes float unless you use `"Int64"`).
+- **Polars**: `df` is `pl.from_arrow(batch)`, `pl` and `np` are pre-imported (`pd` is not), `transform` returns
+  a DataFrame or a LazyFrame (collected; its errors are the step's). Every Polars type holds nulls, so types
+  survive the round trip. The result goes back through `arrowconv.plain_table`: large / view strings,
+  binaries and lists, categoricals and field metadata become the plain Arrow types the rest of the engine
+  uses. Returning a Series, or anything but a frame, is a step error with the reason.
+- Changing the engine is a steps edit, so it clears the cached preview like any other.
+- The editor's engine toggle swaps the untouched starter code and asks before replacing edited code. Its
+  autocomplete follows the engine: for Polars, `pl.` functions and types, DataFrame / LazyFrame / expression
+  methods, `.str` / `.dt` / `.list`, `when` / `then` chains, `group_by`, and column names inside
+  `pl.col("…")`, `df.select("…")`, `.over("…")`. The guide has Polars examples and a pandas → Polars cheat sheet.
+  `tests/test_steps_polars.py` checks every name in that catalog against the installed Polars and runs every
+  Polars example and cheat-sheet line.
 
 **Preview, then run.** `POST /pipelines/{id}/preview` samples the real source, runs the step chain, and
 returns the resulting columns and rows — this is also how the "Load" step knows what it's writing: a
@@ -884,6 +1032,20 @@ celery -A app.worker.celery_app beat --loglevel=info
 ```
 
 ## Not yet verified
+
+- Drivers, the ClickHouse pull and Polars steps: verified live on a separate copy of the stack built from this
+  code (real Celery worker and beat), against throwaway PostgreSQL 16.10, MySQL 8.4 and ClickHouse 24.8 servers:
+  a new PostgreSQL connection saved with *Automatic*; an array column's fallback note on the plan and the job page,
+  and its explicit ADBC refused; MySQL `local_infile` OFF (PyMySQL, with the reason) then ON (LOAD DATA); a pull
+  through a named collection from the wizard's review step and from the API, compared afterwards (5,000 rows
+  identical); a per-job override; a connection set to the classic driver staying on it; a Polars pipeline and a
+  pandas one saved without an engine; the editor's Polars completions; no console errors. Not tried live: MariaDB
+  (connectorx and LOAD DATA were only run against MySQL 8.4), TLS connections with the fast drivers (they fall back
+  by design), a ClickHouse pull from MySQL through the UI (the API and tests did), replicated / cloud ClickHouse
+  targets (refused for the pull), and a source server on a non-UTC zone through the UI (tests flip one).
+- Found while verifying, not fixed (outside this change): a pandas Python step's output decimals get their
+  precision from the preview sample, e.g. `numeric(12,2)` values up to 25.00 cache `DECIMAL(4,2)`, so larger
+  values are rejected at run time. Polars steps keep the column's type.
 
 - Tested against live servers: PostgreSQL 16, MariaDB 10.11, ClickHouse 24.8, SQLite, DuckDB, Redis.
   **MongoDB has only run against `mongomock`** (an in-memory stand-in), never a real server, and MySQL 8

@@ -322,6 +322,44 @@ def test_a_failed_split_redoes_its_pull_and_a_failed_move_continues(client, auth
 
 @needs_pg
 @needs_ch
+def test_splits_finishing_together_move_in_turn(client, auth, pg_collection, monkeypatch):
+    """Splits that reach their move at the same moment: staging tables name their parts alike (all_1_1_0), and two
+    concurrent MOVE PARTITIONs of same-named parts fail in ClickHouse ("Temporary part … already added"). A barrier
+    makes all four arrive together; the per-target lock then lets them through one at a time."""
+    import threading
+
+    from app.engine import chpull
+
+    src, dst = uniq("pc"), uniq("pc_dst")
+    _typed_pg(src, 4000)
+    real, barrier = chpull._move_lock, threading.Barrier(4, timeout=60)
+
+    class Together:
+        def __init__(self, lock):
+            self.lock = lock
+
+        def __enter__(self):
+            barrier.wait()
+            return self.lock.__enter__()
+
+        def __exit__(self, *exc):
+            return self.lock.__exit__(*exc)
+
+    monkeypatch.setattr(chpull, "_move_lock", lambda target: Together(real(target)))
+    try:
+        pg = _pg_source(client, auth, pg_collection.name)
+        ch = add_ch(client, auth)
+        j = run(client, auth, spec(pg, f"public.{src}", ch, f"conduit.{dst}",
+                                   options={"split_column": "id", "splits": 4, "workers": 4, "transfer_method": "clickhouse_pull"}))
+        assert j["status"] == "succeeded", j
+        assert _ch().query(f"SELECT count(), uniqExact(id) FROM conduit.{dst}").result_rows[0] == (4000, 4000)
+    finally:
+        pg_run(f"drop table if exists {src}")
+        _ch().command(f"DROP TABLE IF EXISTS conduit.{dst}")
+
+
+@needs_pg
+@needs_ch
 def test_a_failed_move_is_finished_by_retry_without_duplicates(client, auth, pg_collection, monkeypatch):
     from app.engine import chpull
 

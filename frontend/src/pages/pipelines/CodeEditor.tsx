@@ -32,6 +32,7 @@ export function CodeEditor({ code, onChange, lang, suggest = false, columns = []
   const [charW, setCharW] = useState(7.2);
   const [comp, setComp] = useState<(Completion & { caret: number }) | null>(null);
   const [active, setActive] = useState(0);
+  const [scrollX, setScrollX] = useState(0);
 
   useEffect(() => {
     const measure = () => meter.current && setCharW(meter.current.getBoundingClientRect().width / 20);
@@ -122,17 +123,19 @@ export function CodeEditor({ code, onChange, lang, suggest = false, columns = []
   return (
     <div ref={box} style={{ position: "relative", border: "1px solid var(--border)", borderRadius: 6, background: "var(--code-bg)", minHeight: 160 }}>
       <span ref={meter} aria-hidden style={{ position: "absolute", visibility: "hidden", whiteSpace: "pre", fontFamily: "'Geist Mono',monospace", fontSize: 12 }}>{"M".repeat(20)}</span>
-      <div style={{ padding: `${PAD_TOP}px 0`, fontFamily: "'Geist Mono',monospace", fontSize: 12, lineHeight: `${LINE}px` }}>
+      {/* the highlighted copy stays inside the box and follows the textarea's horizontal scroll (long lines) */}
+      <div style={{ padding: `${PAD_TOP}px 0`, fontFamily: "'Geist Mono',monospace", fontSize: 12, lineHeight: `${LINE}px`, overflow: "hidden" }}>
         {lines.map((ln) => (
           <div key={ln.n} style={{ display: "flex", whiteSpace: "pre", minHeight: LINE }}>
-            <span style={{ width: GUTTER, flexShrink: 0, textAlign: "right", paddingRight: 12, color: "var(--text-3)", userSelect: "none" }}>{ln.n}</span>
-            <span>{ln.segs.map((sg, i) => <span key={i} style={{ color: sg.c }}>{sg.t}</span>)}</span>
+            <span style={{ width: GUTTER, flexShrink: 0, textAlign: "right", paddingRight: 12, color: "var(--text-3)", userSelect: "none", position: "relative", zIndex: 1, background: "var(--code-bg)" }}>{ln.n}</span>
+            <span style={{ transform: `translateX(${-scrollX}px)` }}>{ln.segs.map((sg, i) => <span key={i} style={{ color: sg.c }}>{sg.t}</span>)}</span>
           </div>
         ))}
       </div>
       <textarea
         ref={ta}
         value={code} spellCheck={false}
+        onScroll={(e) => setScrollX(e.currentTarget.scrollLeft)}
         onChange={(e) => onInput(e.target.value, e.target.selectionStart)}
         onKeyDown={onKeyDown}
         onClick={() => setComp(null)}

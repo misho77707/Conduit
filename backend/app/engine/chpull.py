@@ -272,6 +272,18 @@ def _save(job_id: uuid.UUID, idx: int, **values: Any) -> None:
         c.execute(update(JobSplit).where(JobSplit.job_id == job_id, JobSplit.idx == idx).values(**values))
 
 
+_MOVE_LOCKS: dict[str, threading.Lock] = {}
+_MOVE_LOCKS_GUARD = threading.Lock()
+
+
+def _move_lock(target: str) -> threading.Lock:
+    """One move into a target table at a time: staging tables number their parts alike (all_2_2_0 …), and two
+    concurrent MOVE PARTITIONs of same-named parts collide in ClickHouse ("Temporary part tmp_move_from_… already
+    added"). Moves only relink parts, so taking turns costs milliseconds."""
+    with _MOVE_LOCKS_GUARD:
+        return _MOVE_LOCKS.setdefault(target, threading.Lock())
+
+
 def staging_name(job_id: uuid.UUID, idx: int) -> str:
     return f"{STAGE_PREFIX}{job_id.hex[:12]}_{idx}"
 
@@ -321,8 +333,9 @@ def run_split(ctx, idx: int, sp: SplitSpec) -> None:
             pids = [r[0] for r in client.query(
                 "SELECT DISTINCT partition_id FROM system.parts WHERE database = {d:String} AND table = {n:String} AND active",
                 parameters={"d": db, "n": stg_name}).result_rows]
-            for pid in pids:  # each move is atomic and takes the partition out of staging: a retry moves what is left
-                client.command(f"ALTER TABLE {stg} MOVE PARTITION ID {lit(pid)} TO TABLE {target}")
+            with _move_lock(target):
+                for pid in pids:  # each move is atomic and takes the partition out of staging: a retry moves what is left
+                    client.command(f"ALTER TABLE {stg} MOVE PARTITION ID {lit(pid)} TO TABLE {target}")
             client.command(f"DROP TABLE IF EXISTS {stg}")
         _save(ctx.job_id, idx, resume=enc(wm))
     except (Cancelled, PullError):

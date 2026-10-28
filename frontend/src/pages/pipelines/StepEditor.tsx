@@ -145,14 +145,18 @@ function PythonStep({ code, engine, onChange, columns }: {
   const polars = engine === "polars";
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
         <SegmentedControl small value={engine} onChange={switchTo} options={[{ id: "polars", label: "Polars" }, { id: "pandas", label: "pandas" }]} />
-        <span style={{ flex: 1, fontSize: 12, color: "var(--text-3)" }}>
+        <div style={{ flex: 1 }} />
+        <Button height={26} padX={8} icon="menu_book" style={{ fontSize: 12 }} onClick={() => setGuide(true)}>Guide &amp; examples</Button>
+      </div>
+      <div style={{ display: "flex", gap: 8, fontSize: 12, color: "var(--text-3)", alignItems: "flex-start" }}>
+        <Icon name="info" style={{ fontSize: 15, flexShrink: 0 }} />
+        <span>
           {polars
             ? <>Define <code>def transform(df)</code>: receives a Polars DataFrame, returns a DataFrame or a LazyFrame. <code>pl</code> and <code>np</code> are ready to use.</>
             : <>Define <code>def transform(df)</code>: receives and returns a pandas DataFrame. <code>pd</code> and <code>np</code> are ready to use.</>}
         </span>
-        <Button height={26} padX={8} icon="menu_book" style={{ fontSize: 12 }} onClick={() => setGuide(true)}>Guide &amp; examples</Button>
       </div>
       <CodeEditor code={code} onChange={(v) => onChange(v, engine)} lang="py" suggest columns={columns} completer={completer} />
       <div style={{ fontSize: 11, color: "var(--text-3)" }}>
