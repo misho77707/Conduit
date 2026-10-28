@@ -183,6 +183,35 @@ def plain(arr: pa.ChunkedArray | pa.Array) -> pa.Array:
     return arr
 
 
+def _is(check: str, t: pa.DataType) -> bool:
+    """pa.types checks that only newer pyarrow versions have (the view layouts)."""
+    return bool(getattr(pa.types, check, lambda _t: False)(t))
+
+
+def plain_type(t: pa.DataType) -> pa.DataType:
+    """The plain Arrow type the rest of the engine expects in place of a library's own layout: 64-bit-offset and
+    view strings / binaries / lists, dictionaries (a Polars categorical) and extension types, at any depth."""
+    if isinstance(t, pa.BaseExtensionType):
+        return plain_type(t.storage_type)
+    if pa.types.is_dictionary(t):
+        return plain_type(t.value_type)
+    if pa.types.is_large_string(t) or _is("is_string_view", t):
+        return pa.string()
+    if pa.types.is_large_binary(t) or _is("is_binary_view", t):
+        return pa.binary()
+    if pa.types.is_list(t) or pa.types.is_large_list(t) or _is("is_list_view", t) or _is("is_large_list_view", t):
+        return pa.list_(plain_type(t.value_type))
+    if pa.types.is_struct(t):
+        return pa.struct([pa.field(f.name, plain_type(f.type), f.nullable) for f in t])
+    return t
+
+
+def plain_table(table: pa.Table) -> pa.Table:
+    """`table` with plain_type() columns and no schema / field metadata (e.g. what Polars' to_arrow() returns)."""
+    schema = pa.schema([pa.field(f.name, plain_type(f.type), f.nullable) for f in table.schema])
+    return table.cast(schema) if schema != table.schema.remove_metadata() else table.replace_schema_metadata(None)
+
+
 def from_driver(table: pa.Table, cols: list[ColSpec], json_cols: dict[str, bool] | None = None
                 ) -> tuple[pa.Table, list[tuple[str, dict[str, Any]]]]:
     """A fast driver's batch -> exactly what the classic path would make of the same rows.

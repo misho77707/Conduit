@@ -3,7 +3,8 @@
 Steps run per batch, on the same Arrow batches the rest of the load engine already reads and writes
 (see runner.py). Each visual step compiles to one generated SQL statement over a view named `input`;
 a `sql` step is the user's own statement (also over `input`); a `python` step instead execs a
-user-defined `transform(df)` against a pandas DataFrame. Because steps see one batch at a time, not the
+user-defined `transform(df)` against a pandas DataFrame, or a Polars one with config `engine: "polars"` (it may
+return a LazyFrame; the result goes back to plain Arrow types through arrowconv.plain_table). Because steps see one batch at a time, not the
 whole source, anything that needs the complete result set at once - GROUP BY, DISTINCT, a window
 function over the full table - is not supported: that is a known v1 limitation, not an oversight.
 
@@ -20,10 +21,12 @@ from typing import Any
 import duckdb
 import pyarrow as pa
 
+from .arrowconv import plain_table
 from .types import ColSpec, from_arrow
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 STEP_KINDS = ("rename", "cast", "filter", "derive", "split", "sql", "python")
+ENGINES = ("pandas", "polars")  # a Python step's DataFrame library (config "engine"; missing = pandas)
 
 
 class StepError(Exception):
@@ -110,11 +113,15 @@ def _run_sql(sql: str, table: pa.Table) -> pa.Table:
         con.close()
 
 
-def _run_python(code: str, table: pa.Table) -> pa.Table:
-    import numpy as np
-    import pandas as pd
+def step_engine(config: dict[str, Any]) -> str:
+    """A Python step's engine: pandas (also when missing: steps saved before Polars existed) or polars."""
+    engine = config.get("engine") or "pandas"
+    if engine not in ENGINES:
+        raise StepError(f"Python step engine must be one of: {', '.join(ENGINES)} (not {engine!r})")
+    return engine
 
-    ns: dict[str, Any] = {"pd": pd, "np": np}  # pre-imported, as the builder's guide promises
+
+def _transform_fn(code: str, ns: dict[str, Any]):
     try:
         exec(compile(code, "<pipeline step>", "exec"), ns)  # noqa: S102 - the user's own step, run against their own data
     except SyntaxError as e:
@@ -122,6 +129,17 @@ def _run_python(code: str, table: pa.Table) -> pa.Table:
     fn = ns.get("transform")
     if not callable(fn):
         raise StepError("Python step must define def transform(df): ...")
+    return fn
+
+
+def _run_python(code: str, table: pa.Table, engine: str = "pandas") -> pa.Table:
+    import numpy as np
+
+    if engine == "polars":
+        return _run_polars(code, table)
+    import pandas as pd
+
+    fn = _transform_fn(code, {"pd": pd, "np": np})  # pre-imported, as the builder's guide promises
     df = table.to_pandas()
     try:
         out = fn(df)
@@ -135,10 +153,38 @@ def _run_python(code: str, table: pa.Table) -> pa.Table:
         raise StepError(f"transform(df) returned a DataFrame Arrow cannot represent: {e}") from e
 
 
+def _run_polars(code: str, table: pa.Table) -> pa.Table:
+    import numpy as np
+    import polars as pl
+
+    fn = _transform_fn(code, {"pl": pl, "np": np})
+    df = pl.from_arrow(table)
+    if isinstance(df, pl.Series):  # (a one-column table can come back as a Series)
+        df = df.to_frame()
+    try:
+        out = fn(df)
+        if isinstance(out, pl.LazyFrame):
+            out = out.collect()  # its plan's errors surface here, so they are the step's too
+    except Exception as e:  # noqa: BLE001 - any failure in the user's own code, surfaced as a step error
+        raise StepError(f"Python step failed: {type(e).__name__}: {e}") from e
+    if isinstance(out, pl.Series):
+        raise StepError("transform(df) returned a Series: return a DataFrame, e.g. series.to_frame() or "
+                        "df.with_columns(...)")
+    if not isinstance(out, pl.DataFrame):
+        raise StepError(f"transform(df) must return a polars DataFrame or LazyFrame (it returned {type(out).__name__})")
+    try:
+        return plain_table(out.to_arrow())
+    except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as e:
+        raise StepError(f"transform(df) returned columns Arrow cannot carry as plain types: {e}") from e
+
+
 def apply_steps(steps: list[Step], table: pa.Table) -> pa.Table:
     """Run every step in order over one batch. Raises StepError on the first one that fails."""
     for step in steps:
-        table = _run_python(step.config.get("code") or "", table) if step.kind == "python" else _run_sql(_sql_for(step), table)
+        if step.kind == "python":
+            table = _run_python(step.config.get("code") or "", table, step_engine(step.config))
+        else:
+            table = _run_sql(_sql_for(step), table)
     return table
 
 

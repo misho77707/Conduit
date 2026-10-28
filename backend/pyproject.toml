@@ -31,6 +31,7 @@ dependencies = [
   "adbc-driver-postgresql>=1.13",  # the Postgres "adbc" driver option (Arrow over binary COPY)
   "adbc-driver-manager>=1.13",
   "connectorx>=0.4.6",  # the MySQL "fast" driver option's reads (Arrow from Rust)
+  "polars>=2.0,<3",  # the Polars engine of pipeline Python steps (the editor's autocomplete follows 2.x)
 ]
 
 [project.optional-dependencies]

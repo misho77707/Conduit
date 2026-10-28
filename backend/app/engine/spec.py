@@ -230,6 +230,13 @@ class StepIn(BaseModel):
     kind: Literal["rename", "cast", "filter", "derive", "split", "sql", "python"]
     config: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def _engine(self) -> "StepIn":
+        engine = self.config.get("engine")
+        if self.kind == "python" and engine is not None and engine not in ("pandas", "polars"):
+            raise ValueError(f"A Python step's engine is pandas or polars, not {engine!r}")
+        return self
+
 
 class StepOutCol(BaseModel):
     """One column of a step chain's cached output schema (Pipeline.output_columns), from the last preview."""
