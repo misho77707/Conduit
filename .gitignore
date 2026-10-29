@@ -15,6 +15,10 @@ CLAUDE.md
 *.dump
 *.sql
 
+# machine-local compose additions (e.g. a corporate root CA under certs/)
+docker-compose.override.yml
+certs/
+
 # benchmark data and results (backend/bench/bench.py)
 backend/bench/data/
 backend/bench/results/

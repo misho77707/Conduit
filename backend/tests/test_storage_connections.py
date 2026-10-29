@@ -52,6 +52,18 @@ def test_s3_test_reports_a_missing_bucket_clearly(client, auth, s3):
     assert r["ok"] is False and r["error"] == "Bucket nope does not exist"
 
 
+def test_s3_transport_errors_are_explained_not_crashed_on():
+    # botocore's transport errors carry response=None: reading an error code from them used to raise AttributeError
+    from botocore.exceptions import ConnectionClosedError, ReadTimeoutError, SSLError
+
+    from app.connectors.s3 import S3Connector
+    conn = S3Connector({"bucket": "lake"}, {})
+    for e in (ReadTimeoutError(endpoint_url="https://s3"), ConnectionClosedError(endpoint_url="https://s3")):
+        assert str(conn._explain(e, "Listing")).startswith("Could not reach the S3 endpoint")
+    msg = str(conn._explain(SSLError(endpoint_url="https://s3", error="CERTIFICATE_VERIFY_FAILED"), "Listing"))
+    assert "TLS check failed" in msg and "AWS_CA_BUNDLE" in msg
+
+
 def test_s3_validation(client, auth):
     r = client.post("/api/connections", json={"name": "x", "type": "s3", "config": {"region": "eu-west-1"}, "secrets": {"access_key_id": "a"}}, headers=auth)
     assert r.status_code == 422 and "Bucket is required" in r.text and "secret access key" in r.text

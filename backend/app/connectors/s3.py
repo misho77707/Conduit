@@ -9,7 +9,8 @@ from .storage import CHUNK, RangeReader, RemoteEntry, RemoteError, RemoteNotFoun
 
 
 def _code(e: Exception) -> str:
-    return str(getattr(e, "response", {}).get("Error", {}).get("Code", "")) if hasattr(e, "response") else ""
+    resp = getattr(e, "response", None)  # None on botocore's transport errors (read timeout, connection closed)
+    return str((resp.get("Error") or {}).get("Code", "")) if isinstance(resp, dict) else ""
 
 
 class S3Connector(StorageConnector):
@@ -80,7 +81,11 @@ class S3Connector(StorageConnector):
             "PermanentRedirect": f"Bucket {self.bucket} is in another region: set the right region",
             "AuthorizationHeaderMalformed": "The region does not match the bucket's region",
         }.get(code)
-        if msg is None and type(e).__name__ in ("EndpointConnectionError", "ConnectTimeoutError", "ConnectionClosedError"):
+        if msg is None and type(e).__name__ == "SSLError":
+            msg = (f"TLS check failed talking to S3 ({e}). If a proxy or antivirus inspects HTTPS on this network, "
+                   "trust its root certificate in the containers (AWS_CA_BUNDLE, see the README's Remote files limits)")
+        if msg is None and type(e).__name__ in ("EndpointConnectionError", "ConnectTimeoutError", "ConnectionClosedError",
+                                                "ReadTimeoutError", "ProxyConnectionError"):
             msg = f"Could not reach the S3 endpoint: {e}"
         if msg is None and type(e).__name__ == "NoCredentialsError":
             msg = "No credentials: give an access key ID and secret, or run Conduit with an IAM role"
