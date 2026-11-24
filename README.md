@@ -21,6 +21,36 @@ Jobs, the pipeline list, comparison counts), enforced by the API on every route.
 breaks, one when it recovers, a mute), the Users screen, runtime Settings, and export / import between Conduits.
 Not yet built: a watched folder, Avro/ORC.
 
+## A quick tour
+
+All images come from a demo instance filled with made-up data (a shop on PostgreSQL, a CRM on MySQL, a
+ClickHouse warehouse, an S3 bucket on MinIO).
+
+**Load a table into another database.** Pick a source, let the planner suggest a split column, choose the target
+(the DDL is generated), review, run: 2M rows from PostgreSQL into ClickHouse, split in parallel.
+
+![Loading a table from PostgreSQL into ClickHouse with the wizard](docs/screenshots/load-a-table.gif)
+
+**Build a pipeline.** Read → transform → load, with a live preview after every step: visual steps, DuckDB SQL,
+or Python on pandas or Polars with autocomplete for columns and methods.
+
+![Clicking through a pipeline's steps with the preview updating, then Polars autocomplete](docs/screenshots/pipeline-builder.gif)
+
+**Verify a load.** Compare opens pre-filled from a finished job and lists missing rows, extra rows and changed
+values, side by side.
+
+![Verifying a load with Compare](docs/screenshots/verify-a-load.gif)
+
+| | |
+|---|---|
+| ![Connections with health status](docs/screenshots/connections.png) Connections, health-checked in the background | ![Connection types](docs/screenshots/connection-types.png) Six databases and three kinds of file storage |
+| ![Planner recommendation](docs/screenshots/load-plan.png) The planner ranks split columns from catalog metadata | ![Target and generated DDL](docs/screenshots/load-target.png) Target, load mode and the generated `CREATE TABLE` |
+| ![Review step](docs/screenshots/load-review.png) Review: how rows move (driver, or ClickHouse pulls directly) and pre-flight checks | ![A job running](docs/screenshots/job-running.png) A job running: splits, throughput, ETA, live log |
+| ![Pipelines list](docs/screenshots/pipelines.png) Pipelines with cron schedules | ![Pipeline builder](docs/screenshots/pipeline-builder.png) The builder: steps, editor, preview after the step |
+| ![Polars autocomplete](docs/screenshots/polars-autocomplete.png) Python steps on Polars, with autocomplete and docs | ![Combined source](docs/screenshots/combined-source.png) Combined sources: several inputs joined by one SQL |
+| ![Compare result](docs/screenshots/compare.png) Compare: counts, mismatches per column, differing cells | ![Monitor](docs/screenshots/monitor.png) Monitor: connections, host, running jobs, service checks, firing alerts |
+| ![Alerts](docs/screenshots/alerts.png) Alerts to Slack, Telegram, email or webhooks | ![Users](docs/screenshots/users.png) Users and roles: superadmin, admin, viewer |
+
 ## Run it
 
 Needs Docker (on Windows: Docker Desktop with WSL2, run these inside WSL).
